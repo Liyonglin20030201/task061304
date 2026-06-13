@@ -252,6 +252,25 @@ async def _apply_cooldown_filter(
     if not member_ids:
         return []
 
+    # Global 24-hour frequency lock: skip members contacted by ANY campaign in last 24h
+    global_lock_sql = """
+    SELECT DISTINCT member_id
+    FROM campaign_executions
+    WHERE member_id = ANY(:member_ids)
+      AND sent_at >= :cutoff_24h
+      AND status IN ('sent', 'delivered', 'opened', 'converted')
+    """
+    cutoff_24h = datetime.utcnow() - timedelta(hours=24)
+    lock_result = await db.execute(text(global_lock_sql), {
+        "member_ids": member_ids,
+        "cutoff_24h": cutoff_24h,
+    })
+    recently_contacted = {row[0] for row in lock_result.fetchall()}
+    member_ids = [mid for mid in member_ids if mid not in recently_contacted]
+
+    if not member_ids:
+        return []
+
     rule_result = await db.execute(
         select(MarketingRule).where(
             MarketingRule.campaign_id == campaign_id,

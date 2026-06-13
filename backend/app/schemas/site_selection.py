@@ -89,6 +89,7 @@ class WeightProfileCreate(BaseModel):
 class WeightProfileResponse(BaseModel):
     id: int
     name: str
+    version: int = 1
     traffic_weight: float
     competition_weight: float
     demographic_weight: float

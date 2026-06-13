@@ -203,6 +203,8 @@ import ChartPanel from '../components/ChartPanel.vue'
 const evaluations = ref([])
 const profiles = ref([])
 const benchmark = ref({})
+const profileVersionCache = ref({})
+const CURRENT_FIELD_VERSION = 1
 const showAddCandidate = ref(false)
 const showImportDialog = ref(false)
 const showWeightEditor = ref(false)
@@ -280,6 +282,7 @@ async function fetchProfiles() {
   try {
     const { data } = await api.get('/api/site-selection/weight-profiles')
     profiles.value = data
+    data.forEach(p => { profileVersionCache.value[p.id] = p.version || 1 })
     if (data.length > 0 && !selectedProfileId.value) {
       const defaultProfile = data.find(p => p.is_default) || data[0]
       selectedProfileId.value = defaultProfile.id
@@ -288,6 +291,10 @@ async function fetchProfiles() {
 }
 
 function onProfileSelect(profileId) {
+  const profile = profiles.value.find(p => p.id === profileId)
+  if (profile && (profile.version || 1) !== CURRENT_FIELD_VERSION) {
+    ElMessage.warning('该方案版本与当前评估字段不匹配，建议刷新后重新评估')
+  }
   selectedProfileId.value = profileId
 }
 

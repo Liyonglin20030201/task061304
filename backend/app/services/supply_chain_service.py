@@ -121,14 +121,116 @@ async def calculate_all_supplier_performance(
     db: AsyncSession, period_days: int = 90,
     authorized_stores: Optional[List[int]] = None,
 ) -> List[dict]:
-    result = await db.execute(select(Supplier).where(Supplier.is_active == 1))
-    suppliers = result.scalars().all()
+    period_start = date.today() - timedelta(days=period_days)
+    params: dict = {"period_start": period_start}
+
+    store_filter = ""
+    if authorized_stores is not None:
+        store_filter = "AND po.store_id = ANY(:store_ids)"
+        params["store_ids"] = authorized_stores
+
+    batch_sql = f"""
+    WITH authorized_orders AS (
+        SELECT * FROM purchase_orders po
+        WHERE po.order_date >= :period_start AND po.status = 'delivered'
+        {store_filter}
+    ),
+    order_metrics AS (
+        SELECT
+            ao.supplier_id,
+            COUNT(*) as total_orders,
+            SUM(CASE WHEN ao.actual_delivery_date <= ao.expected_delivery_date THEN 1 ELSE 0 END) as on_time,
+            SUM(CASE WHEN ao.actual_delivery_date > ao.expected_delivery_date THEN 1 ELSE 0 END) as late,
+            AVG(ao.actual_delivery_date - ao.order_date) as avg_lead_time
+        FROM authorized_orders ao
+        GROUP BY ao.supplier_id
+    ),
+    item_metrics AS (
+        SELECT
+            ao.supplier_id,
+            COALESCE(SUM(poi.quantity), 0) as total_ordered,
+            COALESCE(SUM(poi.received_quantity), 0) as total_received,
+            COALESCE(SUM(CASE WHEN poi.quality_score IS NOT NULL AND poi.quality_score < 60
+                THEN poi.received_quantity ELSE 0 END), 0) as defect_items
+        FROM purchase_order_items poi
+        JOIN authorized_orders ao ON ao.id = poi.order_id
+        GROUP BY ao.supplier_id
+    ),
+    cost_metrics AS (
+        SELECT
+            ao.supplier_id,
+            COALESCE(AVG(
+                CASE WHEN si.unit_cost > 0
+                THEN (si.unit_cost - poi.unit_cost) / si.unit_cost * 100
+                ELSE 0 END
+            ), 0) as cost_variance
+        FROM purchase_order_items poi
+        JOIN authorized_orders ao ON ao.id = poi.order_id
+        LEFT JOIN supplier_items si ON si.supplier_id = ao.supplier_id AND si.item_id = poi.item_id
+        GROUP BY ao.supplier_id
+    )
+    SELECT
+        s.id, s.name,
+        COALESCE(om.total_orders, 0), COALESCE(om.on_time, 0), COALESCE(om.late, 0),
+        COALESCE(om.avg_lead_time, 0),
+        COALESCE(im.total_ordered, 0), COALESCE(im.total_received, 0), COALESCE(im.defect_items, 0),
+        COALESCE(cm.cost_variance, 0)
+    FROM suppliers s
+    LEFT JOIN order_metrics om ON om.supplier_id = s.id
+    LEFT JOIN item_metrics im ON im.supplier_id = s.id
+    LEFT JOIN cost_metrics cm ON cm.supplier_id = s.id
+    WHERE s.is_active = 1
+    ORDER BY s.name
+    """
+    result = await db.execute(text(batch_sql), params)
+    rows = result.fetchall()
 
     performances = []
-    for supplier in suppliers:
-        metrics = await get_supplier_performance_metrics(db, supplier.id, period_days, authorized_stores)
-        metrics["supplier_name"] = supplier.name
-        performances.append(metrics)
+    for row in rows:
+        supplier_id, supplier_name = row[0], row[1]
+        total_orders, on_time, late = int(row[2]), int(row[3]), int(row[4])
+        avg_lead_time = float(row[5]) if row[5] else 0
+        total_ordered, total_received, defect_items = int(row[6]), int(row[7]), int(row[8])
+        cost_variance = float(row[9])
+
+        on_time_rate = (on_time / total_orders * 100) if total_orders > 0 else 0
+        fulfillment_rate = (total_received / total_ordered * 100) if total_ordered > 0 else 0
+        quality_score = ((total_received - defect_items) / total_received * 100) if total_received > 0 else 100
+        cost_score = max(0, 100 - abs(cost_variance) * 5)
+
+        overall_score = (
+            on_time_rate * 0.30 +
+            fulfillment_rate * 0.25 +
+            quality_score * 0.25 +
+            cost_score * 0.20
+        )
+
+        if overall_score >= 80:
+            health_level = "green"
+        elif overall_score >= 60:
+            health_level = "yellow"
+        else:
+            health_level = "red"
+
+        performances.append({
+            "supplier_id": supplier_id,
+            "supplier_name": supplier_name,
+            "period_start": period_start,
+            "period_end": date.today(),
+            "total_orders": total_orders,
+            "on_time_deliveries": on_time,
+            "late_deliveries": late,
+            "total_items_ordered": total_ordered,
+            "total_items_received": total_received,
+            "defect_items": defect_items,
+            "avg_lead_time_actual": avg_lead_time,
+            "on_time_rate": round(on_time_rate, 1),
+            "fulfillment_rate": round(fulfillment_rate, 1),
+            "quality_score": round(quality_score, 1),
+            "cost_variance_pct": round(cost_variance, 2),
+            "overall_score": round(overall_score, 1),
+            "health_level": health_level,
+        })
 
     return performances
 

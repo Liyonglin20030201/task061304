@@ -242,15 +242,37 @@ function priorityType(p) {
   return p === 'critical' ? 'danger' : p === 'high' ? 'warning' : 'info'
 }
 
+const pendingRequests = new Map()
+
+function generateRequestId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 async function fetchWithRetry(url, options = {}, retries = 3, timeout = 10000) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const { data } = await api.get(url, { ...options, timeout })
-      return data
-    } catch (e) {
-      if (attempt === retries) throw e
-      await new Promise(r => setTimeout(r, 1000 * attempt))
+  if (pendingRequests.has(url)) {
+    return pendingRequests.get(url)
+  }
+  const requestId = generateRequestId()
+  const promise = (async () => {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const { data } = await api.get(url, {
+          ...options,
+          timeout,
+          headers: { ...options.headers, 'X-Request-Id': requestId },
+        })
+        return data
+      } catch (e) {
+        if (attempt === retries) throw e
+        await new Promise(r => setTimeout(r, 1000 * attempt))
+      }
     }
+  })()
+  pendingRequests.set(url, promise)
+  try {
+    return await promise
+  } finally {
+    pendingRequests.delete(url)
   }
 }
 

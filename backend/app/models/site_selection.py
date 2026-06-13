@@ -60,6 +60,7 @@ class SiteWeightProfile(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
+    version = Column(Integer, default=1, nullable=False)
     traffic_weight = Column(Float, default=0.25)
     competition_weight = Column(Float, default=0.20)
     demographic_weight = Column(Float, default=0.20)

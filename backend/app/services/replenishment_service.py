@@ -150,6 +150,39 @@ async def generate_replenishment_suggestions(
             db.add(db_suggestion)
             suggestions.append(suggestion_data)
 
+    # Secondary MOQ validation: aggregate per-supplier totals and round up if below MOQ
+    supplier_totals: dict = {}
+    for s in suggestions:
+        sid = s.get("supplier_id")
+        if sid is not None:
+            supplier_totals.setdefault(sid, []).append(s)
+
+    for sid, items in supplier_totals.items():
+        supplier_result = await db.execute(
+            select(Supplier).where(Supplier.id == sid)
+        )
+        supplier = supplier_result.scalar_one_or_none()
+        if not supplier or not supplier.min_order_qty:
+            continue
+        total_qty = sum(s["suggested_qty"] for s in items)
+        if total_qty < supplier.min_order_qty:
+            deficit = supplier.min_order_qty - total_qty
+            last = items[-1]
+            si_result = await db.execute(
+                select(SupplierItem).where(
+                    SupplierItem.supplier_id == sid,
+                    SupplierItem.item_id == last["item_id"],
+                )
+            )
+            si = si_result.scalar_one_or_none()
+            pkg = (si.packaging_unit or 1) if si else 1
+            added = int(np.ceil(deficit / pkg) * pkg)
+            last["suggested_qty"] += added
+            last["estimated_cost"] = round(
+                last["suggested_qty"] * (last["estimated_cost"] / (last["suggested_qty"] - added)),
+                2,
+            )
+
     await db.commit()
     return suggestions
 
@@ -247,7 +280,6 @@ async def _get_primary_supplier(db: AsyncSession, item_id: str) -> Optional[dict
         "bulk_price": si.bulk_price,
         "bulk_threshold": supplier.bulk_discount_threshold,
         "discount_tiers": tiers,
-    }
     }
 
 
