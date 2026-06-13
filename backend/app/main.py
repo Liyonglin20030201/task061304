@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, Base
 from app.api import auth, stores, sales, inventory, members, promotions, traffic, weather, analytics, imports, reports, tasks
+from app.api import replenishment, site_selection, marketing, supply_chain
 
 
 @asynccontextmanager
@@ -40,6 +41,10 @@ app.include_router(analytics.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
+app.include_router(replenishment.router, prefix="/api")
+app.include_router(site_selection.router, prefix="/api")
+app.include_router(marketing.router, prefix="/api")
+app.include_router(supply_chain.router, prefix="/api")
 
 
 @app.get("/api/health")

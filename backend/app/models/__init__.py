@@ -7,6 +7,18 @@ from app.models.promotion import Promotion
 from app.models.traffic import Traffic
 from app.models.weather import Weather
 from app.models.task_log import ImportTask, TaskLog, DataQualityLog
+from app.models.supply_chain import (
+    Supplier, SupplierItem, PurchaseOrder, PurchaseOrderItem,
+    SupplierPerformance, InventoryAdjustment,
+)
+from app.models.replenishment import ReplenishmentSuggestion, ReplenishmentConfig
+from app.models.marketing import (
+    MarketingCampaign, CampaignExecution, MarketingRule, CampaignAnalytics,
+)
+from app.models.site_selection import (
+    CandidateLocation, LocationFactor, SiteEvaluation,
+    SiteWeightProfile, CompetitorLocation,
+)
 
 __all__ = [
     "User", "Role", "UserStorePermission",
@@ -14,4 +26,10 @@ __all__ = [
     "Member", "MemberTransaction",
     "Promotion", "Traffic", "Weather",
     "ImportTask", "TaskLog", "DataQualityLog",
+    "Supplier", "SupplierItem", "PurchaseOrder", "PurchaseOrderItem",
+    "SupplierPerformance", "InventoryAdjustment",
+    "ReplenishmentSuggestion", "ReplenishmentConfig",
+    "MarketingCampaign", "CampaignExecution", "MarketingRule", "CampaignAnalytics",
+    "CandidateLocation", "LocationFactor", "SiteEvaluation",
+    "SiteWeightProfile", "CompetitorLocation",
 ]

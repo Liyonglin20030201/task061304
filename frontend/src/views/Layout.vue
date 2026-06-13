@@ -10,6 +10,10 @@
         <el-menu-item index="/inventory"><el-icon><Box /></el-icon><span>库存管理</span></el-menu-item>
         <el-menu-item index="/members"><el-icon><User /></el-icon><span>会员管理</span></el-menu-item>
         <el-menu-item index="/analytics"><el-icon><TrendCharts /></el-icon><span>智能分析</span></el-menu-item>
+        <el-menu-item index="/replenishment"><el-icon><SetUp /></el-icon><span>智能补货</span></el-menu-item>
+        <el-menu-item index="/site-selection"><el-icon><MapLocation /></el-icon><span>选址分析</span></el-menu-item>
+        <el-menu-item index="/marketing"><el-icon><Promotion /></el-icon><span>营销自动化</span></el-menu-item>
+        <el-menu-item index="/supply-chain"><el-icon><Connection /></el-icon><span>供应链协同</span></el-menu-item>
         <el-menu-item index="/import"><el-icon><Upload /></el-icon><span>数据导入</span></el-menu-item>
         <el-menu-item index="/reports"><el-icon><Document /></el-icon><span>报表导出</span></el-menu-item>
         <el-menu-item index="/tasks"><el-icon><List /></el-icon><span>任务日志</span></el-menu-item>
