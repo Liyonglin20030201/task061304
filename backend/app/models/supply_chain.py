@@ -34,9 +34,24 @@ class SupplierItem(Base):
     category = Column(String(100))
     unit_cost = Column(Float, nullable=False)
     moq = Column(Integer, default=1)
+    packaging_unit = Column(Integer, default=1)
     bulk_price = Column(Float)
     supply_capacity_daily = Column(Integer)
     is_primary = Column(Integer, default=0)
+
+
+class SupplierDiscountTier(Base):
+    __tablename__ = "supplier_discount_tiers"
+    __table_args__ = (
+        Index("ix_discount_tier_supplier_item", "supplier_id", "item_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    item_id = Column(String(50), nullable=False)
+    min_qty = Column(Integer, nullable=False)
+    discount_rate = Column(Float, nullable=False)
+    tier_price = Column(Float)
 
 
 class PurchaseOrder(Base):

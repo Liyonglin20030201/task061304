@@ -19,7 +19,49 @@ LIFECYCLE_STAGES = {
 }
 
 
+async def _compute_store_level_thresholds(db: AsyncSession) -> dict:
+    """Compute dynamic lifecycle thresholds from last 3 months' repurchase interval distribution.
+    Returns dict with declining_threshold, at_risk_threshold, churned_threshold."""
+    sql = """
+    SELECT interval_days FROM (
+        SELECT
+            member_id,
+            transaction_date - LAG(transaction_date) OVER (
+                PARTITION BY member_id ORDER BY transaction_date
+            ) as interval_days
+        FROM member_transactions
+        WHERE transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+    ) sub
+    WHERE interval_days IS NOT NULL AND interval_days > 0
+    """
+    result = await db.execute(text(sql))
+    rows = result.fetchall()
+
+    if len(rows) < 10:
+        return {"active": 30, "declining": 90, "at_risk": 180}
+
+    intervals = sorted([int(row[0]) for row in rows])
+    p50 = int(np.percentile(intervals, 50))
+    p75 = int(np.percentile(intervals, 75))
+    p95 = int(np.percentile(intervals, 95))
+
+    # active threshold = P50 * 1.5 (within normal repurchase cycle)
+    active_threshold = max(14, int(p50 * 1.5))
+    # declining threshold = P75 * 1.5 (past typical interval)
+    declining_threshold = max(active_threshold + 7, int(p75 * 1.5))
+    # at_risk threshold = P95 * 1.2 (well beyond normal behavior)
+    at_risk_threshold = max(declining_threshold + 14, int(p95 * 1.2))
+
+    return {
+        "active": active_threshold,
+        "declining": declining_threshold,
+        "at_risk": at_risk_threshold,
+    }
+
+
 async def classify_member_lifecycle(db: AsyncSession) -> List[dict]:
+    thresholds = await _compute_store_level_thresholds(db)
+
     sql = """
     SELECT
         m.id, m.member_no, m.name, m.birthday, m.level, m.total_points,
@@ -41,11 +83,11 @@ async def classify_member_lifecycle(db: AsyncSession) -> List[dict]:
 
         if days_registered <= 30:
             stage = "new"
-        elif days_since <= 30:
+        elif days_since <= thresholds["active"]:
             stage = "active"
-        elif days_since <= 90:
+        elif days_since <= thresholds["declining"]:
             stage = "declining"
-        elif days_since <= 180:
+        elif days_since <= thresholds["at_risk"]:
             stage = "at_risk"
         else:
             stage = "churned"
@@ -151,15 +193,19 @@ async def _find_birthday_members(db: AsyncSession) -> List[int]:
 
 
 async def _find_churn_risk_members(db: AsyncSession) -> List[int]:
+    thresholds = await _compute_store_level_thresholds(db)
     sql = """
     SELECT m.id
     FROM members m
     LEFT JOIN member_transactions mt ON mt.member_id = m.id
     WHERE m.is_active = 1
     GROUP BY m.id
-    HAVING CURRENT_DATE - MAX(mt.transaction_date)::date BETWEEN 90 AND 180
+    HAVING CURRENT_DATE - MAX(mt.transaction_date)::date BETWEEN :declining AND :at_risk
     """
-    result = await db.execute(text(sql))
+    result = await db.execute(text(sql), {
+        "declining": thresholds["declining"],
+        "at_risk": thresholds["at_risk"],
+    })
     return [row[0] for row in result.fetchall()]
 
 

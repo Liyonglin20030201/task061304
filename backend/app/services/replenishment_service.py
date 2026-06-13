@@ -5,7 +5,7 @@ from sqlalchemy import select, text
 from datetime import date, timedelta
 from typing import Optional, List
 
-from app.models.supply_chain import Supplier, SupplierItem
+from app.models.supply_chain import Supplier, SupplierItem, SupplierDiscountTier
 from app.models.replenishment import ReplenishmentSuggestion, ReplenishmentConfig
 
 
@@ -75,27 +75,60 @@ async def generate_replenishment_suggestions(
                 eoq = int(adjusted_velocity * config["max_stock_days"])
 
             moq = supplier_info["moq"] if supplier_info else 1
+            packaging_unit = supplier_info.get("packaging_unit", 1) if supplier_info else 1
             suggested_qty = max(eoq, moq)
 
-            if supplier_info and supplier_info.get("bulk_threshold"):
-                if suggested_qty >= supplier_info["bulk_threshold"] * 0.8:
-                    suggested_qty = max(suggested_qty, supplier_info["bulk_threshold"])
+            # Round up to nearest packaging unit
+            if packaging_unit > 1:
+                suggested_qty = int(np.ceil(suggested_qty / packaging_unit) * packaging_unit)
+
+            # Apply tiered discount: find the best tier for this quantity
+            discount_tiers = supplier_info.get("discount_tiers", []) if supplier_info else []
+            bulk_discount_applied = 0
+            effective_unit_cost = unit_cost
+
+            if discount_tiers:
+                # Tiers sorted ascending by min_qty
+                applicable_tier = None
+                next_tier = None
+                for i, tier in enumerate(discount_tiers):
+                    if suggested_qty >= tier["min_qty"]:
+                        applicable_tier = tier
+                    elif next_tier is None:
+                        next_tier = tier
+
+                # Check if bumping up to next tier saves money overall
+                if next_tier and applicable_tier:
+                    cost_at_current = suggested_qty * (applicable_tier.get("tier_price") or unit_cost * (1 - applicable_tier["discount_rate"]))
+                    next_qty = int(np.ceil(next_tier["min_qty"] / packaging_unit) * packaging_unit)
+                    cost_at_next = next_qty * (next_tier.get("tier_price") or unit_cost * (1 - next_tier["discount_rate"]))
+                    if cost_at_next <= cost_at_current * 1.05:
+                        applicable_tier = next_tier
+                        suggested_qty = next_qty
+                elif next_tier and not applicable_tier:
+                    # Below first tier; check if hitting it is worthwhile
+                    next_qty = int(np.ceil(next_tier["min_qty"] / packaging_unit) * packaging_unit)
+                    cost_no_discount = suggested_qty * unit_cost
+                    cost_at_tier = next_qty * (next_tier.get("tier_price") or unit_cost * (1 - next_tier["discount_rate"]))
+                    if cost_at_tier <= cost_no_discount * 1.1:
+                        applicable_tier = next_tier
+                        suggested_qty = next_qty
+
+                if applicable_tier:
+                    effective_unit_cost = applicable_tier.get("tier_price") or unit_cost * (1 - applicable_tier["discount_rate"])
                     bulk_discount_applied = 1
-                else:
-                    bulk_discount_applied = 0
-            else:
-                bulk_discount_applied = 0
 
             max_stock = int(adjusted_velocity * config["max_stock_days"])
             suggested_qty = min(suggested_qty, max(max_stock - current_stock, moq))
             suggested_qty = max(suggested_qty, moq)
+            # Re-align to packaging unit after capping
+            if packaging_unit > 1:
+                suggested_qty = int(np.ceil(suggested_qty / packaging_unit) * packaging_unit)
 
             days_until_stockout = int((current_stock - safety_stock) / adjusted_velocity) if adjusted_velocity > 0 else 999
             optimal_order_date = date.today() + timedelta(days=max(0, days_until_stockout - lead_time))
 
-            estimated_cost = suggested_qty * unit_cost
-            if bulk_discount_applied and supplier_info.get("bulk_price"):
-                estimated_cost = suggested_qty * supplier_info["bulk_price"]
+            estimated_cost = round(suggested_qty * effective_unit_cost, 2)
 
             suggestion_data = {
                 "store_id": store_id,
@@ -189,14 +222,32 @@ async def _get_primary_supplier(db: AsyncSession, item_id: str) -> Optional[dict
     if not row:
         return None
     si, supplier = row
+
+    # Fetch tiered discount schedule
+    tiers_result = await db.execute(
+        select(SupplierDiscountTier)
+        .where(
+            SupplierDiscountTier.supplier_id == supplier.id,
+            SupplierDiscountTier.item_id == item_id,
+        )
+        .order_by(SupplierDiscountTier.min_qty.asc())
+    )
+    tiers = [
+        {"min_qty": t.min_qty, "discount_rate": t.discount_rate, "tier_price": t.tier_price}
+        for t in tiers_result.scalars().all()
+    ]
+
     return {
         "supplier_id": supplier.id,
         "supplier_name": supplier.name,
         "lead_time": supplier.lead_time_days,
         "unit_cost": si.unit_cost,
         "moq": si.moq,
+        "packaging_unit": si.packaging_unit or 1,
         "bulk_price": si.bulk_price,
         "bulk_threshold": supplier.bulk_discount_threshold,
+        "discount_tiers": tiers,
+    }
     }
 
 

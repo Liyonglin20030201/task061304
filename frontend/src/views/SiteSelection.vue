@@ -43,7 +43,15 @@
         </el-card>
 
         <el-card style="margin-top: 16px">
-          <template #header>权重配置</template>
+          <template #header>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span>权重配置</span>
+              <el-button size="small" type="primary" @click="showWeightEditor = true">新建方案</el-button>
+            </div>
+          </template>
+          <el-radio-group v-model="selectedProfileId" size="small" style="margin-bottom:8px" @change="onProfileSelect">
+            <el-radio-button v-for="p in profiles" :key="p.id" :label="p.id">{{ p.name }}</el-radio-button>
+          </el-radio-group>
           <el-table :data="profiles" size="small" border>
             <el-table-column prop="name" label="方案" />
             <el-table-column prop="traffic_weight" label="客流" width="55" />
@@ -151,6 +159,38 @@
         <el-button type="primary" @click="uploadCompetitors" :loading="uploading">导入</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showWeightEditor" title="新建权重方案" width="500px">
+      <el-form :model="newProfile" label-width="80px">
+        <el-form-item label="方案名称">
+          <el-input v-model="newProfile.name" placeholder="如：商业街优先" />
+        </el-form-item>
+        <el-form-item label="客流权重">
+          <el-slider v-model="newProfile.traffic_weight" :min="0" :max="100" :step="5" show-input />
+        </el-form-item>
+        <el-form-item label="竞争权重">
+          <el-slider v-model="newProfile.competition_weight" :min="0" :max="100" :step="5" show-input />
+        </el-form-item>
+        <el-form-item label="人口权重">
+          <el-slider v-model="newProfile.demographic_weight" :min="0" :max="100" :step="5" show-input />
+        </el-form-item>
+        <el-form-item label="交通权重">
+          <el-slider v-model="newProfile.transport_weight" :min="0" :max="100" :step="5" show-input />
+        </el-form-item>
+        <el-form-item label="商业权重">
+          <el-slider v-model="newProfile.commercial_weight" :min="0" :max="100" :step="5" show-input />
+        </el-form-item>
+        <el-form-item>
+          <span :style="{ color: weightSum !== 100 ? '#F56C6C' : '#67C23A' }">
+            权重合计: {{ weightSum }}% {{ weightSum !== 100 ? '(需为100%)' : '✓' }}
+          </span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showWeightEditor = false">取消</el-button>
+        <el-button type="primary" @click="submitProfile" :disabled="weightSum !== 100">保存方案</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -165,8 +205,25 @@ const profiles = ref([])
 const benchmark = ref({})
 const showAddCandidate = ref(false)
 const showImportDialog = ref(false)
+const showWeightEditor = ref(false)
 const uploading = ref(false)
 const uploadFile = ref(null)
+const selectedProfileId = ref(null)
+
+const newProfile = reactive({
+  name: '',
+  traffic_weight: 25,
+  competition_weight: 20,
+  demographic_weight: 20,
+  transport_weight: 15,
+  commercial_weight: 20,
+})
+
+const weightSum = computed(() =>
+  newProfile.traffic_weight + newProfile.competition_weight +
+  newProfile.demographic_weight + newProfile.transport_weight +
+  newProfile.commercial_weight
+)
 
 const newCandidate = reactive({
   name: '', address: '', city: '', district: '',
@@ -223,7 +280,32 @@ async function fetchProfiles() {
   try {
     const { data } = await api.get('/api/site-selection/weight-profiles')
     profiles.value = data
+    if (data.length > 0 && !selectedProfileId.value) {
+      const defaultProfile = data.find(p => p.is_default) || data[0]
+      selectedProfileId.value = defaultProfile.id
+    }
   } catch (e) { console.error(e) }
+}
+
+function onProfileSelect(profileId) {
+  selectedProfileId.value = profileId
+}
+
+async function submitProfile() {
+  try {
+    const payload = {
+      name: newProfile.name,
+      traffic_weight: newProfile.traffic_weight / 100,
+      competition_weight: newProfile.competition_weight / 100,
+      demographic_weight: newProfile.demographic_weight / 100,
+      transport_weight: newProfile.transport_weight / 100,
+      commercial_weight: newProfile.commercial_weight / 100,
+    }
+    await api.post('/api/site-selection/weight-profiles', payload)
+    ElMessage.success('权重方案已保存')
+    showWeightEditor.value = false
+    fetchProfiles()
+  } catch (e) { ElMessage.error('保存失败') }
 }
 
 async function fetchBenchmark() {
@@ -244,7 +326,9 @@ async function submitCandidate() {
 
 async function evaluateCandidate(row) {
   try {
-    const { data } = await api.post(`/api/site-selection/candidates/${row.id}/evaluate`)
+    const params = {}
+    if (selectedProfileId.value) params.weight_profile_id = selectedProfileId.value
+    const { data } = await api.post(`/api/site-selection/candidates/${row.id}/evaluate`, null, { params })
     ElMessage.success(`评估完成，总分: ${data.total_score}`)
     fetchCandidates()
   } catch (e) { ElMessage.error('评估失败') }

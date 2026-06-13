@@ -242,32 +242,47 @@ function priorityType(p) {
   return p === 'critical' ? 'danger' : p === 'high' ? 'warning' : 'info'
 }
 
+async function fetchWithRetry(url, options = {}, retries = 3, timeout = 10000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const { data } = await api.get(url, { ...options, timeout })
+      return data
+    } catch (e) {
+      if (attempt === retries) throw e
+      await new Promise(r => setTimeout(r, 1000 * attempt))
+    }
+  }
+}
+
 async function fetchDashboard() {
   try {
-    const { data } = await api.get('/api/supply-chain/health-dashboard')
+    const data = await fetchWithRetry('/api/supply-chain/health-dashboard')
     dashboard.value = data
-  } catch (e) { console.error(e) }
+  } catch (e) {
+    console.error('健康仪表盘加载失败', e)
+    ElMessage.error('仪表盘数据加载超时，请重试')
+  }
 }
 
 async function fetchOrders() {
   try {
     const params = {}
     if (orderFilter.status) params.status = orderFilter.status
-    const { data } = await api.get('/api/supply-chain/orders', { params })
+    const data = await fetchWithRetry('/api/supply-chain/orders', { params })
     orders.value = data
   } catch (e) { console.error(e) }
 }
 
 async function fetchStockout() {
   try {
-    const { data } = await api.get('/api/supply-chain/stockout-analysis')
+    const data = await fetchWithRetry('/api/supply-chain/stockout-analysis')
     stockoutData.value = data
   } catch (e) { console.error(e) }
 }
 
 async function fetchRecommendations() {
   try {
-    const { data } = await api.get('/api/supply-chain/recommendations')
+    const data = await fetchWithRetry('/api/supply-chain/recommendations')
     recommendations.value = data
   } catch (e) { console.error(e) }
 }

@@ -11,11 +11,18 @@ from app.models.supply_chain import (
 
 
 async def get_supplier_performance_metrics(
-    db: AsyncSession, supplier_id: int, period_days: int = 90
+    db: AsyncSession, supplier_id: int, period_days: int = 90,
+    authorized_stores: Optional[List[int]] = None,
 ) -> dict:
     period_start = date.today() - timedelta(days=period_days)
 
-    sql = """
+    store_filter = ""
+    params = {"sid": supplier_id, "period_start": period_start}
+    if authorized_stores is not None:
+        store_filter = "AND store_id = ANY(:store_ids)"
+        params["store_ids"] = authorized_stores
+
+    sql = f"""
     SELECT
         COUNT(*) as total_orders,
         SUM(CASE WHEN actual_delivery_date <= expected_delivery_date THEN 1 ELSE 0 END) as on_time,
@@ -25,8 +32,9 @@ async def get_supplier_performance_metrics(
     WHERE supplier_id = :sid
       AND order_date >= :period_start
       AND status = 'delivered'
+      {store_filter}
     """
-    result = await db.execute(text(sql), {"sid": supplier_id, "period_start": period_start})
+    result = await db.execute(text(sql), params)
     row = result.fetchone()
 
     total_orders = row[0] or 0
@@ -34,7 +42,7 @@ async def get_supplier_performance_metrics(
     late = row[2] or 0
     avg_lead_time = float(row[3]) if row[3] else 0
 
-    item_sql = """
+    item_sql = f"""
     SELECT
         COALESCE(SUM(poi.quantity), 0) as total_ordered,
         COALESCE(SUM(poi.received_quantity), 0) as total_received,
@@ -44,8 +52,9 @@ async def get_supplier_performance_metrics(
     WHERE po.supplier_id = :sid
       AND po.order_date >= :period_start
       AND po.status = 'delivered'
+      {store_filter}
     """
-    item_result = await db.execute(text(item_sql), {"sid": supplier_id, "period_start": period_start})
+    item_result = await db.execute(text(item_sql), params)
     item_row = item_result.fetchone()
 
     total_ordered = item_row[0] or 0
@@ -56,7 +65,7 @@ async def get_supplier_performance_metrics(
     fulfillment_rate = (total_received / total_ordered * 100) if total_ordered > 0 else 0
     quality_score = ((total_received - defect_items) / total_received * 100) if total_received > 0 else 100
 
-    cost_sql = """
+    cost_sql = f"""
     SELECT
         COALESCE(AVG(
             CASE WHEN si.unit_cost > 0
@@ -67,8 +76,9 @@ async def get_supplier_performance_metrics(
     JOIN purchase_orders po ON po.id = poi.order_id
     LEFT JOIN supplier_items si ON si.supplier_id = po.supplier_id AND si.item_id = poi.item_id
     WHERE po.supplier_id = :sid AND po.order_date >= :period_start AND po.status = 'delivered'
+      {store_filter}
     """
-    cost_result = await db.execute(text(cost_sql), {"sid": supplier_id, "period_start": period_start})
+    cost_result = await db.execute(text(cost_sql), params)
     cost_variance = float(cost_result.scalar() or 0)
 
     cost_score = max(0, 100 - abs(cost_variance) * 5)
@@ -107,21 +117,26 @@ async def get_supplier_performance_metrics(
     }
 
 
-async def calculate_all_supplier_performance(db: AsyncSession, period_days: int = 90) -> List[dict]:
+async def calculate_all_supplier_performance(
+    db: AsyncSession, period_days: int = 90,
+    authorized_stores: Optional[List[int]] = None,
+) -> List[dict]:
     result = await db.execute(select(Supplier).where(Supplier.is_active == 1))
     suppliers = result.scalars().all()
 
     performances = []
     for supplier in suppliers:
-        metrics = await get_supplier_performance_metrics(db, supplier.id, period_days)
+        metrics = await get_supplier_performance_metrics(db, supplier.id, period_days, authorized_stores)
         metrics["supplier_name"] = supplier.name
         performances.append(metrics)
 
     return performances
 
 
-async def get_health_dashboard(db: AsyncSession) -> dict:
-    performances = await calculate_all_supplier_performance(db)
+async def get_health_dashboard(
+    db: AsyncSession, authorized_stores: Optional[List[int]] = None
+) -> dict:
+    performances = await calculate_all_supplier_performance(db, authorized_stores=authorized_stores)
 
     green_count = sum(1 for p in performances if p["health_level"] == "green")
     yellow_count = sum(1 for p in performances if p["health_level"] == "yellow")

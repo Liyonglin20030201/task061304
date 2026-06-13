@@ -268,7 +268,8 @@ async def list_performance(
     db: AsyncSession = Depends(get_db),
     user_stores: tuple = Depends(get_current_user_with_stores),
 ):
-    return await calculate_all_supplier_performance(db, period_days)
+    user, authorized_stores, role_name = user_stores
+    return await calculate_all_supplier_performance(db, period_days, authorized_stores)
 
 
 @router.post("/performance/calculate")
@@ -280,7 +281,7 @@ async def recalculate_performance(
     user, authorized_stores, role_name = user_stores
     if role_name not in (ROLE_ADMIN, ROLE_MANAGER):
         raise HTTPException(status_code=403, detail="权限不足")
-    performances = await calculate_all_supplier_performance(db, period_days)
+    performances = await calculate_all_supplier_performance(db, period_days, authorized_stores)
 
     for perf in performances:
         record = SupplierPerformance(
@@ -310,7 +311,8 @@ async def get_supplier_detail(
     db: AsyncSession = Depends(get_db),
     user_stores: tuple = Depends(get_current_user_with_stores),
 ):
-    return await get_supplier_performance_metrics(db, supplier_id, period_days)
+    user, authorized_stores, role_name = user_stores
+    return await get_supplier_performance_metrics(db, supplier_id, period_days, authorized_stores)
 
 
 @router.get("/performance/{supplier_id}/trend")
@@ -338,7 +340,8 @@ async def health_dashboard(
     db: AsyncSession = Depends(get_db),
     user_stores: tuple = Depends(get_current_user_with_stores),
 ):
-    return await get_health_dashboard(db)
+    user, authorized_stores, role_name = user_stores
+    return await get_health_dashboard(db, authorized_stores)
 
 
 @router.post("/adjustments", response_model=InventoryAdjustmentResponse)
