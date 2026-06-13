@@ -3,12 +3,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from datetime import date, timedelta
 
+CHINESE_HOLIDAYS = {
+    (1, 1), (1, 2), (1, 3),
+    (2, 10), (2, 11), (2, 12), (2, 13), (2, 14), (2, 15), (2, 16),
+    (4, 4), (4, 5), (4, 6),
+    (5, 1), (5, 2), (5, 3), (5, 4), (5, 5),
+    (6, 10), (6, 11), (6, 12),
+    (9, 15), (9, 16), (9, 17),
+    (10, 1), (10, 2), (10, 3), (10, 4), (10, 5), (10, 6), (10, 7),
+}
+
+
+def _is_holiday(d: date) -> bool:
+    return (d.month, d.day) in CHINESE_HOLIDAYS
+
+
+def _holiday_indicator(d: date) -> float:
+    if _is_holiday(d):
+        return 1.0
+    tomorrow = d + timedelta(days=1)
+    yesterday = d - timedelta(days=1)
+    if _is_holiday(tomorrow) or _is_holiday(yesterday):
+        return 0.5
+    return 0.0
+
 
 async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30) -> dict:
     sql = """
     SELECT sale_date, SUM(total_amount) as daily_sales
     FROM sales
-    WHERE store_id = :sid AND sale_date >= CURRENT_DATE - INTERVAL '180 days'
+    WHERE store_id = :sid AND sale_date >= CURRENT_DATE - INTERVAL '365 days'
     GROUP BY sale_date
     ORDER BY sale_date
     """
@@ -21,6 +45,9 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
     dates = [row[0] for row in rows]
     values = np.array([float(row[1]) for row in rows])
 
+    holiday_flags = np.array([_holiday_indicator(d) for d in dates])
+    holiday_effect = _estimate_holiday_effect(values, holiday_flags)
+
     trend, seasonal, residual = _stl_decompose(values, period=7)
 
     forecast_trend = _extrapolate_trend(trend, periods)
@@ -28,6 +55,18 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
     forecast_residual = np.full(periods, np.mean(residual[-14:]))
 
     forecast_values = forecast_trend + forecast_seasonal + forecast_residual
+
+    last_date = dates[-1]
+    forecast_dates = []
+    forecast_holiday_flags = []
+    for i in range(periods):
+        fd = last_date + timedelta(days=i + 1)
+        forecast_dates.append(fd.isoformat())
+        forecast_holiday_flags.append(_holiday_indicator(fd))
+
+    for i, hf in enumerate(forecast_holiday_flags):
+        if hf > 0:
+            forecast_values[i] *= (1.0 + holiday_effect * hf)
 
     promo_sql = """
     SELECT start_date, end_date, discount_rate, discount_amount, promo_type
@@ -56,11 +95,6 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
     hist_promos = hist_promo_result.fetchall()
 
     promo_lift = _calculate_promo_lift(hist_promos)
-
-    last_date = dates[-1]
-    forecast_dates = []
-    for i in range(periods):
-        forecast_dates.append((last_date + timedelta(days=i + 1)).isoformat())
 
     for promo in promos:
         p_start, p_end, p_discount_rate, p_discount_amount, p_type = promo
@@ -106,7 +140,7 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
     confidence_upper = forecast_values + 1.96 * residual_std * confidence_factor
     confidence_lower = np.maximum(confidence_lower, 0)
 
-    backtesting = _rolling_backtest(values)
+    backtesting = _rolling_backtest(values, dates)
 
     return {
         "store_id": store_id,
@@ -115,6 +149,7 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
             "trend_last": round(float(trend[-1]), 2),
             "seasonal_pattern": [round(float(s), 2) for s in seasonal[-7:]],
             "residual_std": round(float(residual_std), 2),
+            "holiday_effect": round(float(holiday_effect), 3),
         },
         "forecast": [
             {
@@ -122,12 +157,25 @@ async def get_sales_forecast(db: AsyncSession, store_id: int, periods: int = 30)
                 "value": round(float(forecast_values[i]), 2),
                 "lower": round(float(confidence_lower[i]), 2),
                 "upper": round(float(confidence_upper[i]), 2),
+                "is_holiday": forecast_holiday_flags[i] > 0,
             }
             for i in range(periods)
         ],
         "metrics": backtesting,
         "promo_lift_factors": promo_lift,
     }
+
+
+def _estimate_holiday_effect(values: np.ndarray, holiday_flags: np.ndarray) -> float:
+    holiday_mask = holiday_flags > 0.5
+    normal_mask = holiday_flags == 0
+    if holiday_mask.sum() < 3 or normal_mask.sum() < 7:
+        return 0.25
+    holiday_mean = np.mean(values[holiday_mask])
+    normal_mean = np.mean(values[normal_mask])
+    if normal_mean > 0:
+        return max((holiday_mean - normal_mean) / normal_mean, 0.0)
+    return 0.25
 
 
 def _stl_decompose(values: np.ndarray, period: int = 7, iterations: int = 3):
@@ -211,7 +259,7 @@ def _estimate_lift(discount_rate, discount_amount) -> float:
     return 0.10
 
 
-def _rolling_backtest(values: np.ndarray, window: int = 7) -> dict:
+def _rolling_backtest(values: np.ndarray, dates: list = None, window: int = 7) -> dict:
     n = len(values)
     if n < window * 4:
         return {"mape": None, "rmse": None, "message": "数据不足以进行回测"}
@@ -225,6 +273,17 @@ def _rolling_backtest(values: np.ndarray, window: int = 7) -> dict:
     forecast_seasonal = _extrapolate_seasonal(seasonal, window, period=7)
     forecast_residual = np.full(window, np.mean(residual[-14:]))
     forecast = forecast_trend + forecast_seasonal + forecast_residual
+
+    if dates is not None and len(dates) >= n:
+        train_dates = dates[:test_start]
+        test_dates = dates[test_start:]
+        train_holidays = np.array([_holiday_indicator(d) for d in train_dates])
+        holiday_eff = _estimate_holiday_effect(train, train_holidays)
+        for i, d in enumerate(test_dates):
+            hf = _holiday_indicator(d)
+            if hf > 0:
+                forecast[i] *= (1.0 + holiday_eff * hf)
+
     forecast = np.maximum(forecast, 0)
 
     abs_errors = np.abs(forecast - test)
@@ -236,6 +295,6 @@ def _rolling_backtest(values: np.ndarray, window: int = 7) -> dict:
         "mape": round(mape, 2),
         "rmse": round(rmse, 2),
         "confidence_level": "95%",
-        "method": "STL decomposition + damped trend + promotion lift calibration",
+        "method": "STL + holiday markers + promotion lift calibration",
         "backtest_window": window,
     }

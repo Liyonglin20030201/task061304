@@ -9,7 +9,7 @@ async def calculate_kpi(
 ) -> dict:
     store_filter = ""
     params = {"start": start_date, "end": end_date}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND s.store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -33,9 +33,9 @@ async def calculate_kpi(
     SELECT COALESCE(SUM(st.area_sqm), 1) as total_area
     FROM stores st
     WHERE st.is_active = true
-    {"AND st.id = ANY(:store_ids)" if store_ids else ""}
+    {"AND st.id = ANY(:store_ids)" if store_ids is not None else ""}
     """
-    area_result = await db.execute(text(area_sql), {"store_ids": store_ids} if store_ids else {})
+    area_result = await db.execute(text(area_sql), {"store_ids": store_ids} if store_ids is not None else {})
     area_row = area_result.fetchone()
     total_area = area_row[0] if area_row else 1
 
@@ -61,7 +61,7 @@ async def get_store_ranking(
 ) -> list:
     store_filter = ""
     params = {"start": start_date, "end": end_date}
-    if authorized_stores:
+    if authorized_stores is not None:
         store_filter = "AND s.store_id = ANY(:store_ids)"
         params["store_ids"] = authorized_stores
 

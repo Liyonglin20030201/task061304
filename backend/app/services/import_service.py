@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, List
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
 from app.config import get_settings
@@ -18,14 +18,16 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
 
     import_progress[task_id] = {"status": "processing", "progress": 0, "processed_rows": 0, "total_rows": 0}
 
+    # Use a separate session for status updates (these commit independently)
+    async with async_session() as status_db:
+        await status_db.execute(
+            text("UPDATE import_tasks SET status='processing', started_at=:now WHERE id=:id"),
+            {"id": task_id, "now": datetime.now(timezone.utc)},
+        )
+        await status_db.commit()
+
     async with async_session() as db:
         try:
-            await db.execute(
-                text("UPDATE import_tasks SET status='processing', started_at=:now WHERE id=:id"),
-                {"id": task_id, "now": datetime.now(timezone.utc)},
-            )
-            await db.commit()
-
             if file_path.endswith(".csv"):
                 total_rows = 0
                 with open(file_path, encoding="utf-8", errors="ignore") as f:
@@ -33,19 +35,20 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
                         total_rows += 1
                 total_rows = max(total_rows - 1, 0)
             else:
-                df_temp = pd.read_excel(file_path, nrows=0)
                 import openpyxl
                 wb = openpyxl.load_workbook(file_path, read_only=True)
                 ws = wb.active
                 total_rows = ws.max_row - 1 if ws.max_row else 0
                 wb.close()
 
-            await db.execute(
-                text("UPDATE import_tasks SET total_rows=:total WHERE id=:id"),
-                {"id": task_id, "total": total_rows},
-            )
-            await db.commit()
             import_progress[task_id]["total_rows"] = total_rows
+
+            async with async_session() as status_db:
+                await status_db.execute(
+                    text("UPDATE import_tasks SET total_rows=:total WHERE id=:id"),
+                    {"id": task_id, "total": total_rows},
+                )
+                await status_db.commit()
 
             chunk_size = settings.CHUNK_SIZE
             processed = 0
@@ -59,9 +62,11 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
                 df_full = pd.read_excel(file_path)
                 reader = [df_full[i:i + chunk_size] for i in range(0, len(df_full), chunk_size)]
 
+            # All inserts happen within a single transaction (no intermediate commits)
+            # If any batch fails, the entire import is rolled back
             for chunk in reader:
                 cleaned, chunk_errors, chunk_dupes = clean_dataframe(chunk, data_type)
-                batch_success = await _insert_batch(db, cleaned, data_type)
+                batch_success = await _insert_batch_no_commit(db, cleaned, data_type)
                 processed += len(chunk)
                 success += batch_success
                 errors += chunk_errors
@@ -77,38 +82,43 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
                     "status": "processing",
                 })
 
-                await db.execute(
-                    text("""UPDATE import_tasks SET processed_rows=:p, success_rows=:s,
-                            error_rows=:e, duplicate_rows=:d WHERE id=:id"""),
-                    {"p": processed, "s": success, "e": errors, "d": duplicates, "id": task_id},
-                )
-                await db.commit()
-
-                await _log_task(db, task_id, "info",
-                    f"批次完成: {processed}/{total_rows} 行 ({progress_pct}%), 成功{batch_success}, 错误{chunk_errors}, 重复{chunk_dupes}")
-
-            await db.execute(
-                text("UPDATE import_tasks SET status='completed', completed_at=:now WHERE id=:id"),
-                {"id": task_id, "now": datetime.now(timezone.utc)},
-            )
+            # All batches succeeded — commit the entire transaction atomically
             await db.commit()
+
+            async with async_session() as status_db:
+                await status_db.execute(
+                    text("""UPDATE import_tasks SET status='completed', completed_at=:now,
+                            processed_rows=:p, success_rows=:s, error_rows=:e, duplicate_rows=:d
+                            WHERE id=:id"""),
+                    {"id": task_id, "now": datetime.now(timezone.utc),
+                     "p": processed, "s": success, "e": errors, "d": duplicates},
+                )
+                await status_db.commit()
+                await _log_task(status_db, task_id, "info",
+                    f"导入完成(原子提交): 总{total_rows}行, 成功{success}, 错误{errors}, 重复{duplicates}")
 
             import_progress[task_id].update({"status": "completed", "progress": 100.0})
-            await _log_task(db, task_id, "info",
-                f"导入完成: 总{total_rows}行, 成功{success}, 错误{errors}, 重复{duplicates}")
 
         except Exception as e:
-            await db.execute(
-                text("UPDATE import_tasks SET status='failed', error_details=:err WHERE id=:id"),
-                {"id": task_id, "err": str(e)},
-            )
-            await db.commit()
+            # Rollback ALL inserted data — return to pre-import state
+            await db.rollback()
+
+            async with async_session() as status_db:
+                await status_db.execute(
+                    text("UPDATE import_tasks SET status='failed', error_details=:err WHERE id=:id"),
+                    {"id": task_id, "err": str(e)},
+                )
+                await status_db.commit()
+                await _log_task(status_db, task_id, "error",
+                    f"导入失败，已回滚全部数据: {str(e)}")
+
             import_progress[task_id].update({"status": "failed", "error": str(e)})
-            await _log_task(db, task_id, "error", f"导入失败: {str(e)}")
+
     await engine.dispose()
 
 
-async def _insert_batch(db: AsyncSession, df: pd.DataFrame, data_type: str) -> int:
+async def _insert_batch_no_commit(db: AsyncSession, df: pd.DataFrame, data_type: str) -> int:
+    """Insert a batch of records WITHOUT committing. Caller manages the transaction."""
     if df.empty:
         return 0
 
@@ -143,16 +153,10 @@ async def _insert_batch(db: AsyncSession, df: pd.DataFrame, data_type: str) -> i
         sql = f"INSERT INTO {table} ({col_str}) VALUES ({val_placeholders})"
 
     inserted = 0
-    batch_size = 500
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
-        for record in batch:
-            try:
-                await db.execute(text(sql), record)
-                inserted += 1
-            except Exception:
-                pass
-        await db.commit()
+    for record in records:
+        await db.execute(text(sql), record)
+        inserted += 1
+    # No commit here — transaction stays open
     return inserted
 
 
