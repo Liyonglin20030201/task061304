@@ -36,6 +36,24 @@ def clean_dataframe(df: pd.DataFrame, data_type: str) -> Tuple[pd.DataFrame, int
     return df, errors, duplicates
 
 
+def _interpolate_numeric(df: pd.DataFrame, columns: list, group_col: str = None) -> pd.DataFrame:
+    """Fill missing numeric values using linear interpolation instead of dropping rows."""
+    for col in columns:
+        if col not in df.columns:
+            continue
+        if group_col and group_col in df.columns:
+            df[col] = df.groupby(group_col)[col].transform(
+                lambda s: s.interpolate(method="linear", limit_direction="both")
+            )
+        else:
+            df[col] = df[col].interpolate(method="linear", limit_direction="both")
+        # fallback: fill any remaining NaN with column median
+        if df[col].isna().any():
+            median_val = df[col].median()
+            df[col] = df[col].fillna(median_val if pd.notna(median_val) else 0)
+    return df
+
+
 def _clean_sales(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     errors = 0
     required = ["store_id", "sale_date", "receipt_no", "item_id", "quantity", "unit_price", "total_amount"]
@@ -43,8 +61,10 @@ def _clean_sales(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         if col not in df.columns:
             return pd.DataFrame(), len(df)
 
+    # Only drop rows missing truly required business keys (non-interpolatable)
+    key_cols = ["store_id", "sale_date", "receipt_no", "item_id"]
     before = len(df)
-    df = df.dropna(subset=required)
+    df = df.dropna(subset=key_cols)
     errors += before - len(df)
 
     df["store_id"] = pd.to_numeric(df["store_id"], errors="coerce")
@@ -52,10 +72,15 @@ def _clean_sales(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce")
     df["total_amount"] = pd.to_numeric(df["total_amount"], errors="coerce")
 
-    invalid = df[["store_id", "quantity", "unit_price", "total_amount"]].isna().any(axis=1)
-    errors += invalid.sum()
-    df = df[~invalid]
+    # Interpolate missing numeric values instead of dropping
+    df = _interpolate_numeric(df, ["quantity", "unit_price", "total_amount"], group_col="store_id")
 
+    # Only drop rows where store_id is invalid (can't interpolate IDs)
+    invalid_store = df["store_id"].isna()
+    errors += invalid_store.sum()
+    df = df[~invalid_store]
+
+    # Filter obviously invalid data (negative qty/price)
     df = df[df["quantity"] > 0]
     df = df[df["unit_price"] >= 0]
     df = df[df["total_amount"] >= 0]
@@ -67,6 +92,10 @@ def _clean_sales(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         df["discount_amount"] = 0
     df["discount_amount"] = pd.to_numeric(df["discount_amount"], errors="coerce").fillna(0)
 
+    # Recalculate total_amount if it was interpolated and we have qty+price
+    mask = (df["total_amount"] == 0) & (df["quantity"] > 0) & (df["unit_price"] > 0)
+    df.loc[mask, "total_amount"] = df.loc[mask, "quantity"] * df.loc[mask, "unit_price"]
+
     return df, errors
 
 
@@ -77,23 +106,33 @@ def _clean_inventory(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         if col not in df.columns:
             return pd.DataFrame(), len(df)
 
+    # Drop only rows missing business keys
+    key_cols = ["store_id", "item_id", "snapshot_date"]
     before = len(df)
-    df = df.dropna(subset=required)
+    df = df.dropna(subset=key_cols)
     errors += before - len(df)
 
     df["store_id"] = pd.to_numeric(df["store_id"], errors="coerce")
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
-    invalid = df[["store_id", "quantity"]].isna().any(axis=1)
-    errors += invalid.sum()
-    df = df[~invalid]
+
+    # Interpolate missing quantity values
+    df = _interpolate_numeric(df, ["quantity"], group_col="item_id")
+
+    invalid_store = df["store_id"].isna()
+    errors += invalid_store.sum()
+    df = df[~invalid_store]
 
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date
     df = df.dropna(subset=["snapshot_date"])
 
     if "unit_cost" in df.columns:
         df["unit_cost"] = pd.to_numeric(df["unit_cost"], errors="coerce")
+        df = _interpolate_numeric(df, ["unit_cost"], group_col="item_id")
     if "total_value" not in df.columns and "unit_cost" in df.columns:
         df["total_value"] = df["quantity"] * df["unit_cost"]
+    elif "total_value" in df.columns:
+        df["total_value"] = pd.to_numeric(df["total_value"], errors="coerce")
+        df = _interpolate_numeric(df, ["total_value"], group_col="item_id")
 
     return df, errors
 
@@ -126,13 +165,18 @@ def _clean_traffic(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         if col not in df.columns:
             return pd.DataFrame(), len(df)
 
+    # Drop only rows missing time-dimension keys
+    key_cols = ["store_id", "traffic_date", "hour"]
     before = len(df)
-    df = df.dropna(subset=required)
+    df = df.dropna(subset=key_cols)
     errors += before - len(df)
 
     df["store_id"] = pd.to_numeric(df["store_id"], errors="coerce")
     df["hour"] = pd.to_numeric(df["hour"], errors="coerce")
     df["enter_count"] = pd.to_numeric(df["enter_count"], errors="coerce")
+
+    # Interpolate missing enter_count
+    df = _interpolate_numeric(df, ["enter_count", "exit_count", "pass_by_count"], group_col="store_id")
 
     df = df[(df["hour"] >= 0) & (df["hour"] <= 23)]
     df = df[df["enter_count"] >= 0]
@@ -157,9 +201,14 @@ def _clean_weather(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     df["weather_date"] = pd.to_datetime(df["weather_date"], errors="coerce").dt.date
     df = df.dropna(subset=["weather_date"])
 
-    for col in ["temp_high", "temp_low", "humidity", "wind_speed", "precipitation"]:
+    numeric_cols = ["temp_high", "temp_low", "humidity", "wind_speed", "precipitation"]
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Interpolate missing weather metrics instead of leaving them as NaN
+    existing_numeric = [c for c in numeric_cols if c in df.columns]
+    df = _interpolate_numeric(df, existing_numeric, group_col="city")
 
     if "humidity" in df.columns:
         df.loc[df["humidity"] > 100, "humidity"] = 100

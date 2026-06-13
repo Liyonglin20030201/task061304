@@ -23,7 +23,7 @@ async def list_members(
 ):
     user, authorized_stores, role_name = user_stores
     query = select(Member)
-    if authorized_stores:
+    if authorized_stores is not None:
         query = query.where(Member.register_store_id.in_(authorized_stores))
     if level:
         query = query.where(Member.level == level)

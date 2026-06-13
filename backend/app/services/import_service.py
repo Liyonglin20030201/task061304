@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+from typing import Dict
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
 from app.config import get_settings
@@ -8,10 +9,14 @@ from app.services.cleaning_service import clean_dataframe
 
 settings = get_settings()
 
+import_progress: Dict[int, dict] = {}
+
 
 async def process_import_file(task_id: int, file_path: str, data_type: str):
     engine = create_async_engine(settings.DATABASE_URL)
     async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    import_progress[task_id] = {"status": "processing", "progress": 0, "processed_rows": 0, "total_rows": 0}
 
     async with async_session() as db:
         try:
@@ -22,16 +27,25 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
             await db.commit()
 
             if file_path.endswith(".csv"):
-                total_rows = sum(1 for _ in open(file_path, encoding="utf-8")) - 1
+                total_rows = 0
+                with open(file_path, encoding="utf-8", errors="ignore") as f:
+                    for _ in f:
+                        total_rows += 1
+                total_rows = max(total_rows - 1, 0)
             else:
-                df_temp = pd.read_excel(file_path)
-                total_rows = len(df_temp)
+                df_temp = pd.read_excel(file_path, nrows=0)
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True)
+                ws = wb.active
+                total_rows = ws.max_row - 1 if ws.max_row else 0
+                wb.close()
 
             await db.execute(
                 text("UPDATE import_tasks SET total_rows=:total WHERE id=:id"),
                 {"id": task_id, "total": total_rows},
             )
             await db.commit()
+            import_progress[task_id]["total_rows"] = total_rows
 
             chunk_size = settings.CHUNK_SIZE
             processed = 0
@@ -40,7 +54,7 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
             duplicates = 0
 
             if file_path.endswith(".csv"):
-                reader = pd.read_csv(file_path, chunksize=chunk_size, encoding="utf-8")
+                reader = pd.read_csv(file_path, chunksize=chunk_size, encoding="utf-8", on_bad_lines="skip")
             else:
                 df_full = pd.read_excel(file_path)
                 reader = [df_full[i:i + chunk_size] for i in range(0, len(df_full), chunk_size)]
@@ -53,6 +67,16 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
                 errors += chunk_errors
                 duplicates += chunk_dupes
 
+                progress_pct = round(processed / max(total_rows, 1) * 100, 1)
+                import_progress[task_id].update({
+                    "progress": progress_pct,
+                    "processed_rows": processed,
+                    "success_rows": success,
+                    "error_rows": errors,
+                    "duplicate_rows": duplicates,
+                    "status": "processing",
+                })
+
                 await db.execute(
                     text("""UPDATE import_tasks SET processed_rows=:p, success_rows=:s,
                             error_rows=:e, duplicate_rows=:d WHERE id=:id"""),
@@ -60,7 +84,8 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
                 )
                 await db.commit()
 
-                await _log_task(db, task_id, "info", f"已处理 {processed}/{total_rows} 行")
+                await _log_task(db, task_id, "info",
+                    f"批次完成: {processed}/{total_rows} 行 ({progress_pct}%), 成功{batch_success}, 错误{chunk_errors}, 重复{chunk_dupes}")
 
             await db.execute(
                 text("UPDATE import_tasks SET status='completed', completed_at=:now WHERE id=:id"),
@@ -68,12 +93,17 @@ async def process_import_file(task_id: int, file_path: str, data_type: str):
             )
             await db.commit()
 
+            import_progress[task_id].update({"status": "completed", "progress": 100.0})
+            await _log_task(db, task_id, "info",
+                f"导入完成: 总{total_rows}行, 成功{success}, 错误{errors}, 重复{duplicates}")
+
         except Exception as e:
             await db.execute(
                 text("UPDATE import_tasks SET status='failed', error_details=:err WHERE id=:id"),
                 {"id": task_id, "err": str(e)},
             )
             await db.commit()
+            import_progress[task_id].update({"status": "failed", "error": str(e)})
             await _log_task(db, task_id, "error", f"导入失败: {str(e)}")
     await engine.dispose()
 
@@ -113,13 +143,16 @@ async def _insert_batch(db: AsyncSession, df: pd.DataFrame, data_type: str) -> i
         sql = f"INSERT INTO {table} ({col_str}) VALUES ({val_placeholders})"
 
     inserted = 0
-    for record in records:
-        try:
-            await db.execute(text(sql), record)
-            inserted += 1
-        except Exception:
-            pass
-    await db.commit()
+    batch_size = 500
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i + batch_size]
+        for record in batch:
+            try:
+                await db.execute(text(sql), record)
+                inserted += 1
+            except Exception:
+                pass
+        await db.commit()
     return inserted
 
 

@@ -8,7 +8,7 @@ from app.models.traffic import Traffic
 from app.schemas.traffic import TrafficResponse
 from app.schemas.common import PaginatedResponse
 from app.api.deps import get_current_user_with_stores
-from app.core.permissions import filter_by_authorized_stores
+from app.core.permissions import filter_by_authorized_stores, enforce_store_access
 
 router = APIRouter(prefix="/traffic", tags=["客流数据"])
 
@@ -24,6 +24,8 @@ async def list_traffic(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = user_stores
+    if store_id is not None:
+        enforce_store_access(authorized_stores, store_id)
     query = select(Traffic)
     query = filter_by_authorized_stores(query, Traffic.store_id, authorized_stores)
     if store_id:

@@ -68,3 +68,47 @@ async def test_viewer_cannot_access_unauthorized_store(client: AsyncClient, db_s
     token = create_access_token({"sub": "102", "role": "viewer"})
     response = await client.get("/api/stores/5", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_viewer_with_no_permissions_sees_nothing(client: AsyncClient, db_session, setup_roles):
+    """A non-admin user with no store assignments should see zero stores, not all."""
+    store = Store(id=6, code="S006", name="门店六", city="成都")
+    db_session.add(store)
+    await db_session.flush()
+
+    viewer = User(
+        id=103, username="viewer_empty", email="viewer_empty@test.com",
+        hashed_password=get_password_hash("Test123"), role_id=3,
+    )
+    db_session.add(viewer)
+    await db_session.commit()
+    # No UserStorePermission rows for this user
+
+    token = create_access_token({"sub": "103", "role": "viewer"})
+    response = await client.get("/api/stores", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    stores = response.json()
+    assert len(stores) == 0  # must see nothing, not everything
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_access_forecast_for_unauthorized_store(client: AsyncClient, db_session, setup_roles):
+    """Analytics forecast endpoint must return 403, not a data leak."""
+    store = Store(id=7, code="S007", name="门店七", city="武汉")
+    db_session.add(store)
+    await db_session.flush()
+
+    viewer = User(
+        id=104, username="viewer_forecast", email="viewer_forecast@test.com",
+        hashed_password=get_password_hash("Test123"), role_id=3,
+    )
+    db_session.add(viewer)
+    await db_session.commit()
+
+    token = create_access_token({"sub": "104", "role": "viewer"})
+    response = await client.get(
+        "/api/analytics/forecast?store_id=7&periods=7",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403

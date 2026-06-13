@@ -8,7 +8,7 @@ from app.models.promotion import Promotion
 from app.schemas.promotion import PromotionResponse
 from app.schemas.common import PaginatedResponse
 from app.api.deps import get_current_user_with_stores
-from app.core.permissions import filter_by_authorized_stores
+from app.core.permissions import filter_by_authorized_stores, enforce_store_access
 
 router = APIRouter(prefix="/promotions", tags=["促销活动"])
 
@@ -23,6 +23,8 @@ async def list_promotions(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = user_stores
+    if store_id is not None:
+        enforce_store_access(authorized_stores, store_id)
     query = select(Promotion)
     query = filter_by_authorized_stores(query, Promotion.store_id, authorized_stores)
     if store_id:

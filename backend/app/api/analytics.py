@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from datetime import date
 from app.database import get_db
-from app.api.deps import get_current_user_with_stores
+from app.api.deps import get_auth_context, AuthContext
+from app.core.permissions import enforce_store_access
 from app.services.analytics_service import (
     calculate_kpi, get_store_ranking, detect_missing_periods,
 )
@@ -19,16 +20,12 @@ async def get_kpi(
     start_date: date = Query(...),
     end_date: date = Query(...),
     store_ids: Optional[str] = Query(None, description="逗号分隔的门店ID"),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    requested_stores = [int(s) for s in store_ids.split(",")] if store_ids else None
-    if authorized_stores and requested_stores:
-        requested_stores = [s for s in requested_stores if s in authorized_stores]
-    elif authorized_stores:
-        requested_stores = authorized_stores
-    return await calculate_kpi(db, start_date, end_date, requested_stores)
+    requested = [int(s) for s in store_ids.split(",")] if store_ids else None
+    effective_stores = auth.get_effective_stores(requested)
+    return await calculate_kpi(db, start_date, end_date, effective_stores)
 
 
 @router.get("/ranking")
@@ -36,34 +33,31 @@ async def get_ranking(
     start_date: date = Query(...),
     end_date: date = Query(...),
     metric: str = Query("gmv", description="排名指标: gmv, orders, avg_ticket"),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    return await get_store_ranking(db, start_date, end_date, metric, authorized_stores)
+    return await get_store_ranking(db, start_date, end_date, metric, auth.authorized_stores)
 
 
 @router.get("/segmentation")
 async def get_segmentation(
     store_ids: Optional[str] = Query(None),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    requested_stores = [int(s) for s in store_ids.split(",")] if store_ids else authorized_stores
-    return await get_rfm_segmentation(db, requested_stores)
+    requested = [int(s) for s in store_ids.split(",")] if store_ids else None
+    effective_stores = auth.get_effective_stores(requested)
+    return await get_rfm_segmentation(db, effective_stores)
 
 
 @router.get("/forecast")
 async def get_forecast(
     store_id: int = Query(...),
     periods: int = Query(30, ge=7, le=90),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    if authorized_stores and store_id not in authorized_stores:
-        return {"error": "无权访问该门店数据"}
+    enforce_store_access(auth.authorized_stores, store_id)
     return await get_sales_forecast(db, store_id, periods)
 
 
@@ -72,22 +66,20 @@ async def get_anomalies(
     start_date: date = Query(...),
     end_date: date = Query(...),
     store_ids: Optional[str] = Query(None),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    requested_stores = [int(s) for s in store_ids.split(",")] if store_ids else authorized_stores
-    return await detect_anomalies(db, start_date, end_date, requested_stores)
+    requested = [int(s) for s in store_ids.split(",")] if store_ids else None
+    effective_stores = auth.get_effective_stores(requested)
+    return await detect_anomalies(db, start_date, end_date, effective_stores)
 
 
 @router.get("/missing-periods")
 async def get_missing_periods(
     store_id: int = Query(...),
     data_type: str = Query("sales"),
-    user_stores: tuple = Depends(get_current_user_with_stores),
+    auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user, authorized_stores, role_name = user_stores
-    if authorized_stores and store_id not in authorized_stores:
-        return {"error": "无权访问该门店数据"}
+    enforce_store_access(auth.authorized_stores, store_id)
     return await detect_missing_periods(db, store_id, data_type)

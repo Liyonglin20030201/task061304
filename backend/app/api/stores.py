@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.store import Store
 from app.schemas.store import StoreCreate, StoreResponse
 from app.api.deps import get_current_user_with_stores, require_role
+from app.core.permissions import filter_by_authorized_stores, enforce_store_access
 
 router = APIRouter(prefix="/stores", tags=["门店管理"])
 
@@ -17,8 +18,7 @@ async def list_stores(
 ):
     user, authorized_stores, role_name = user_stores
     query = select(Store).where(Store.is_active == True)
-    if authorized_stores:
-        query = query.where(Store.id.in_(authorized_stores))
+    query = filter_by_authorized_stores(query, Store.id, authorized_stores)
     result = await db.execute(query.order_by(Store.code))
     return result.scalars().all()
 
@@ -43,8 +43,7 @@ async def get_store(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = user_stores
-    if authorized_stores and store_id not in authorized_stores:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该门店")
+    enforce_store_access(authorized_stores, store_id)
     result = await db.execute(select(Store).where(Store.id == store_id))
     store = result.scalar_one_or_none()
     if not store:

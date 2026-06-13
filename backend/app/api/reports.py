@@ -21,9 +21,9 @@ async def export_report(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = user_stores
-    if authorized_stores and request.store_ids:
+    if authorized_stores is not None and request.store_ids:
         request.store_ids = [s for s in request.store_ids if s in authorized_stores]
-    elif authorized_stores:
+    elif authorized_stores is not None:
         request.store_ids = authorized_stores
     return await generate_report(db, request, user.id)
 

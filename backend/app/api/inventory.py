@@ -8,7 +8,7 @@ from app.models.inventory import Inventory
 from app.schemas.inventory import InventoryResponse
 from app.schemas.common import PaginatedResponse
 from app.api.deps import get_current_user_with_stores
-from app.core.permissions import filter_by_authorized_stores
+from app.core.permissions import filter_by_authorized_stores, enforce_store_access
 
 router = APIRouter(prefix="/inventory", tags=["库存数据"])
 
@@ -24,6 +24,8 @@ async def list_inventory(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = user_stores
+    if store_id is not None:
+        enforce_store_access(authorized_stores, store_id)
     query = select(Inventory)
     query = filter_by_authorized_stores(query, Inventory.store_id, authorized_stores)
     if store_id:
