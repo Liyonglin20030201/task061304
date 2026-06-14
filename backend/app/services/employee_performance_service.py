@@ -45,7 +45,7 @@ async def _calc_sales_score(db: AsyncSession, employee_id: int, store_id: int, s
         FROM employee_sales_records
         WHERE employee_id = :emp_id AND record_date BETWEEN :start AND :end
     """)
-    result = await db.execute(sql, {"emp_id": employee_id, "start": str(start_date), "end": str(end_date)})
+    result = await db.execute(sql, {"emp_id": employee_id, "start": start_date, "end": end_date})
     row = result.fetchone()
     emp_revenue, emp_qty, emp_conv = row[0], row[1], row[2] or 0
 
@@ -55,7 +55,7 @@ async def _calc_sales_score(db: AsyncSession, employee_id: int, store_id: int, s
         WHERE store_id = :store_id AND record_date BETWEEN :start AND :end
         GROUP BY employee_id
     """)
-    peers_result = await db.execute(peers_sql, {"store_id": store_id, "start": str(start_date), "end": str(end_date)})
+    peers_result = await db.execute(peers_sql, {"store_id": store_id, "start": start_date, "end": end_date})
     peers = peers_result.fetchall()
 
     if not peers:
@@ -72,15 +72,21 @@ async def _calc_sales_score(db: AsyncSession, employee_id: int, store_id: int, s
 
 async def _calc_service_score(db: AsyncSession, employee_id: int, start_date: date, end_date: date) -> float:
     sql = text("""
-        SELECT AVG(customer_rating), COALESCE(SUM(complaint_count), 0), COALESCE(SUM(praise_count), 0)
-        FROM employee_service_records
-        WHERE employee_id = :emp_id AND record_date BETWEEN :start AND :end
+        SELECT AVG(sr.customer_rating), COALESCE(SUM(sr.complaint_count), 0), COALESCE(SUM(sr.praise_count), 0),
+               COUNT(sr.id)
+        FROM employee_service_records sr
+        JOIN employees e ON e.id = sr.employee_id AND e.store_id = sr.store_id
+        WHERE sr.employee_id = :emp_id AND sr.record_date BETWEEN :start AND :end
     """)
-    result = await db.execute(sql, {"emp_id": employee_id, "start": str(start_date), "end": str(end_date)})
+    result = await db.execute(sql, {"emp_id": employee_id, "start": start_date, "end": end_date})
     row = result.fetchone()
     avg_rating = row[0] or 3.0
     complaints = row[1]
     praises = row[2]
+    record_count = row[3]
+
+    if record_count == 0:
+        return 60.0
 
     base = (avg_rating / 5.0) * 80
     bonus = min(20, praises * 3)
@@ -90,15 +96,21 @@ async def _calc_service_score(db: AsyncSession, employee_id: int, start_date: da
 
 async def _calc_attendance_score(db: AsyncSession, employee_id: int, start_date: date, end_date: date) -> float:
     sql = text("""
-        SELECT COALESCE(SUM(is_absent), 0), COALESCE(SUM(is_late), 0),
-               COALESCE(SUM(scheduled_hours), 0), COALESCE(SUM(actual_hours), 0)
-        FROM employee_attendance
-        WHERE employee_id = :emp_id AND attend_date BETWEEN :start AND :end
+        SELECT COALESCE(SUM(ea.is_absent), 0), COALESCE(SUM(ea.is_late), 0),
+               COALESCE(SUM(ea.scheduled_hours), 0), COALESCE(SUM(ea.actual_hours), 0),
+               COUNT(ea.id)
+        FROM employee_attendance ea
+        JOIN employees e ON e.id = ea.employee_id AND e.store_id = ea.store_id
+        WHERE ea.employee_id = :emp_id AND ea.attend_date BETWEEN :start AND :end
     """)
-    result = await db.execute(sql, {"emp_id": employee_id, "start": str(start_date), "end": str(end_date)})
+    result = await db.execute(sql, {"emp_id": employee_id, "start": start_date, "end": end_date})
     row = result.fetchone()
     absents, lates = row[0], row[1]
     scheduled, actual = row[2], row[3]
+    record_count = row[4]
+
+    if record_count == 0:
+        return 70.0
 
     missed_hours = max(0, scheduled - actual)
     score = 100 - absents * 15 - lates * 5 - missed_hours * 2
@@ -113,7 +125,7 @@ async def _calc_training_score(db: AsyncSession, employee_id: int, start_date: d
         FROM employee_training
         WHERE employee_id = :emp_id AND scheduled_date BETWEEN :start AND :end
     """)
-    result = await db.execute(sql, {"emp_id": employee_id, "start": str(start_date), "end": str(end_date)})
+    result = await db.execute(sql, {"emp_id": employee_id, "start": start_date, "end": end_date})
     row = result.fetchone()
     total = row[0] or 0
     completed = row[1] or 0
@@ -166,9 +178,12 @@ async def get_performance_ranking(
     db: AsyncSession, store_ids: Optional[List[int]],
     start_date: date, end_date: date, position: Optional[str] = None, top_n: int = 20,
 ) -> List[dict]:
+    if store_ids is not None and len(store_ids) == 0:
+        return []
+
     store_filter = ""
-    params = {"start": str(start_date), "end": str(end_date)}
-    if store_ids:
+    params = {"start": start_date, "end": end_date}
+    if store_ids is not None:
         store_filter = "AND store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -278,9 +293,15 @@ async def get_peer_comparison(db: AsyncSession, employee_id: int, start_date: da
 
 
 async def get_dashboard(db: AsyncSession, store_ids: Optional[List[int]], start_date: date, end_date: date) -> dict:
+    if store_ids is not None and len(store_ids) == 0:
+        return {
+            "avg_score": 0, "top_performer": None, "top_score": 0,
+            "improvement_rate": 0, "avg_attendance_rate": 0, "total_employees": 0,
+        }
+
     store_filter = ""
     params = {}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 

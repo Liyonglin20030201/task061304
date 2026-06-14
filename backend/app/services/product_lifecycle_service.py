@@ -18,12 +18,21 @@ def _detect_stage(growth_rates: List[float], weeks_since_launch: int, adoption_r
     if weeks_since_launch <= 8 and adoption_rate < 0.5:
         return STAGE_INTRODUCTION
 
-    recent = growth_rates[-4:]
-    positive_weeks = sum(1 for g in recent if g > 0.05)
-    negative_weeks = sum(1 for g in recent if g < -0.05)
-    stable_weeks = sum(1 for g in recent if abs(g) <= 0.05)
+    # Compute adaptive threshold from historical volatility (std of growth rates)
+    volatility = float(np.std(growth_rates)) if len(growth_rates) >= 4 else 0.05
+    decline_threshold = -max(0.03, min(0.15, volatility * 1.2))
+    growth_threshold = max(0.03, min(0.15, volatility * 1.2))
+    stable_band = max(0.03, min(0.10, volatility * 0.8))
 
-    if negative_weeks >= 3 or (velocity < category_median_velocity * 0.3 and weeks_since_launch > 26):
+    # Velocity floor adapts: use 1 std below category median instead of fixed 0.3x
+    velocity_floor = max(0, category_median_velocity - volatility * category_median_velocity)
+
+    recent = growth_rates[-4:]
+    positive_weeks = sum(1 for g in recent if g > growth_threshold)
+    negative_weeks = sum(1 for g in recent if g < decline_threshold)
+    stable_weeks = sum(1 for g in recent if abs(g) <= stable_band)
+
+    if negative_weeks >= 3 or (velocity < velocity_floor and weeks_since_launch > 26):
         return STAGE_DECLINE
 
     if positive_weeks >= 3 and adoption_rate >= 0.5:
@@ -41,7 +50,7 @@ def _detect_stage(growth_rates: List[float], weeks_since_launch: int, adoption_r
 async def get_lifecycle_overview(db: AsyncSession, store_ids: Optional[List[int]], category: Optional[str] = None) -> dict:
     store_filter = ""
     params = {}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND pls.store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -84,7 +93,7 @@ async def get_products_with_stage(
 ) -> dict:
     conditions = ["1=1"]
     params = {}
-    if store_ids:
+    if store_ids is not None:
         conditions.append("pls.store_id = ANY(:store_ids)")
         params["store_ids"] = store_ids
     if stage:
@@ -139,7 +148,7 @@ async def get_products_with_stage(
 async def get_lifecycle_curve(db: AsyncSession, product_id: int, store_ids: Optional[List[int]] = None) -> dict:
     store_filter = ""
     params = {"product_id": product_id}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -170,7 +179,7 @@ async def get_lifecycle_curve(db: AsyncSession, product_id: int, store_ids: Opti
 async def get_stage_transitions(db: AsyncSession, store_ids: Optional[List[int]], days: int = 30) -> List[dict]:
     store_filter = ""
     params = {"days": days}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND pls.store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -200,7 +209,7 @@ async def get_stage_transitions(db: AsyncSession, store_ids: Optional[List[int]]
 async def get_stage_kpis(db: AsyncSession, store_ids: Optional[List[int]], stage: str) -> dict:
     store_filter = ""
     params = {"stage": stage}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -245,7 +254,7 @@ async def get_stage_kpis(db: AsyncSession, store_ids: Optional[List[int]], stage
 async def get_retirement_recommendations(db: AsyncSession, store_ids: Optional[List[int]], category: Optional[str] = None) -> List[dict]:
     store_filter = ""
     params = {}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND prr.store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -280,7 +289,7 @@ async def get_retirement_recommendations(db: AsyncSession, store_ids: Optional[L
 async def recalculate_lifecycle(db: AsyncSession, store_ids: Optional[List[int]]) -> dict:
     store_filter = ""
     params = {}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND s.store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 

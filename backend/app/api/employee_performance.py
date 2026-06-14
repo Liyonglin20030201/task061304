@@ -67,6 +67,10 @@ async def get_trend(
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    from sqlalchemy import text as _text
+    row = (await db.execute(_text("SELECT store_id FROM employees WHERE id = :eid"), {"eid": employee_id})).fetchone()
+    if row:
+        enforce_store_access(auth.authorized_stores, row[0])
     return await employee_performance_service.get_performance_trend(db, employee_id, months)
 
 
@@ -79,6 +83,10 @@ async def get_comparison(
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    from sqlalchemy import text as _text
+    row = (await db.execute(_text("SELECT store_id FROM employees WHERE id = :eid"), {"eid": employee_id})).fetchone()
+    if row:
+        enforce_store_access(auth.authorized_stores, row[0])
     sd = date.fromisoformat(start_date)
     ed = date.fromisoformat(end_date)
     return await employee_performance_service.get_peer_comparison(db, employee_id, sd, ed, scope)

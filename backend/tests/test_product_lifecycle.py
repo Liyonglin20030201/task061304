@@ -30,7 +30,8 @@ def test_detect_stage_decline_negative_growth():
 
 
 def test_detect_stage_decline_low_velocity():
-    result = _detect_stage(growth_rates=[0.01, -0.02, 0.01, -0.03], weeks_since_launch=30, adoption_rate=0.5, velocity=1.0, category_median_velocity=5.0)
+    # Low velocity combined with extended age triggers decline via volatility-based floor
+    result = _detect_stage(growth_rates=[0.01, -0.02, 0.01, -0.03, -0.04, -0.02, -0.06, -0.08], weeks_since_launch=30, adoption_rate=0.5, velocity=0.5, category_median_velocity=5.0)
     assert result == "decline"
 
 

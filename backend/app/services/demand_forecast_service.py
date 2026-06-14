@@ -157,7 +157,7 @@ async def get_forecast_comparison(db: AsyncSession, store_id: int, periods: int 
 async def get_accuracy_history(db: AsyncSession, store_ids: Optional[List[int]], model_name: Optional[str] = None, days: int = 90) -> List[dict]:
     conditions = ["evaluation_date >= CURRENT_DATE - :days"]
     params = {"days": days}
-    if store_ids:
+    if store_ids is not None:
         conditions.append("store_id = ANY(:store_ids)")
         params["store_ids"] = store_ids
     if model_name:
@@ -194,24 +194,35 @@ async def get_signals(db: AsyncSession, region: Optional[str] = None, signal_typ
 
     where = " AND ".join(conditions)
     sql = text(f"""
-        SELECT id, signal_type, signal_date, region, category, value, source, confidence
+        SELECT id, signal_type, signal_date, region, category, value, raw_value, source, confidence
         FROM external_market_signals WHERE {where}
         ORDER BY signal_date DESC LIMIT 100
     """)
     result = await db.execute(sql, params)
     rows = result.fetchall()
-    return [{"id": r[0], "signal_type": r[1], "signal_date": str(r[2]), "region": r[3], "category": r[4], "value": r[5], "source": r[6], "confidence": r[7]} for r in rows]
+    return [{"id": r[0], "signal_type": r[1], "signal_date": str(r[2]), "region": r[3], "category": r[4], "value": r[5], "raw_value": r[6], "source": r[7], "confidence": r[8]} for r in rows]
 
 
 async def create_signal(db: AsyncSession, signal_data: dict) -> dict:
     now = datetime.now(timezone.utc)
+    insert_data = {
+        "signal_type": signal_data["signal_type"],
+        "signal_date": signal_data["signal_date"],
+        "region": signal_data.get("region"),
+        "category": signal_data.get("category"),
+        "value": signal_data["value"],
+        "raw_value": signal_data.get("raw_value"),
+        "source": signal_data.get("source"),
+        "confidence": signal_data.get("confidence", 1.0),
+        "now": now,
+    }
     sql = text("""
         INSERT INTO external_market_signals (signal_type, signal_date, region, category, value, raw_value, source, confidence, created_at)
         VALUES (:signal_type, :signal_date, :region, :category, :value, :raw_value, :source, :confidence, :now)
-        ON CONFLICT (signal_type, signal_date, region) DO UPDATE SET value = :value, confidence = :confidence
+        ON CONFLICT (signal_type, signal_date, region) DO UPDATE SET value = :value, raw_value = :raw_value, confidence = :confidence
         RETURNING id
     """)
-    result = await db.execute(sql, {**signal_data, "now": now})
+    result = await db.execute(sql, insert_data)
     signal_id = result.scalar()
     await db.commit()
     return {"id": signal_id, "message": "信号已录入"}
@@ -220,7 +231,7 @@ async def create_signal(db: AsyncSession, signal_data: dict) -> dict:
 async def get_ab_experiments(db: AsyncSession, store_ids: Optional[List[int]], status: Optional[str] = None) -> List[dict]:
     conditions = ["1=1"]
     params = {}
-    if store_ids:
+    if store_ids is not None:
         conditions.append("store_id = ANY(:store_ids)")
         params["store_ids"] = store_ids
     if status:

@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.api.deps import get_auth_context, AuthContext, require_role
 from app.core.permissions import enforce_store_access
+from app.schemas.demand_forecast import ExternalSignalCreate
 from app.services import demand_forecast_service
 
 router = APIRouter(prefix="/demand-forecast", tags=["智能需求预测"])
@@ -60,11 +61,11 @@ async def get_signals(
 
 @router.post("/signals")
 async def create_signal(
-    signal_data: dict,
+    signal_data: ExternalSignalCreate,
     db: AsyncSession = Depends(get_db),
     _=Depends(require_role(["admin"])),
 ):
-    return await demand_forecast_service.create_signal(db, signal_data)
+    return await demand_forecast_service.create_signal(db, signal_data.model_dump())
 
 
 @router.get("/ab-experiments")

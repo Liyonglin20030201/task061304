@@ -16,7 +16,7 @@ TABLE_CONFIG = {
 async def _check_completeness(db: AsyncSession, target_table: str, store_ids: Optional[List[int]], check_date: date) -> dict:
     store_filter = ""
     params = {"check_date": str(check_date)}
-    if store_ids:
+    if store_ids is not None:
         store_filter = f"AND {TABLE_CONFIG.get(target_table, {}).get('store_column', 'store_id')} = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -70,7 +70,7 @@ async def _check_completeness(db: AsyncSession, target_table: str, store_ids: Op
 async def _check_accuracy(db: AsyncSession, target_table: str, store_ids: Optional[List[int]], check_date: date) -> dict:
     store_filter = ""
     params = {"check_date": str(check_date)}
-    if store_ids:
+    if store_ids is not None:
         store_filter = f"AND {TABLE_CONFIG.get(target_table, {}).get('store_column', 'store_id')} = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -131,7 +131,7 @@ async def _check_accuracy(db: AsyncSession, target_table: str, store_ids: Option
 async def _check_timeliness(db: AsyncSession, target_table: str, store_ids: Optional[List[int]], check_date: date) -> dict:
     store_filter = ""
     params = {}
-    if store_ids:
+    if store_ids is not None:
         store_filter = f"WHERE {TABLE_CONFIG.get(target_table, {}).get('store_column', 'store_id')} = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -242,7 +242,7 @@ async def get_quality_scores(
 async def get_score_trend(db: AsyncSession, store_ids: Optional[List[int]], target_table: Optional[str] = None, days: int = 30) -> List[dict]:
     store_filter = ""
     params = {"days": days}
-    if store_ids:
+    if store_ids is not None:
         store_filter = "AND store_id = ANY(:store_ids)"
         params["store_ids"] = store_ids
 
@@ -270,7 +270,7 @@ async def get_alerts(
 ) -> dict:
     conditions = ["1=1"]
     params = {}
-    if store_ids:
+    if store_ids is not None:
         conditions.append("store_id = ANY(:store_ids)")
         params["store_ids"] = store_ids
     if severity:

@@ -4,12 +4,13 @@ from datetime import date, datetime
 
 
 class ExternalSignalCreate(BaseModel):
-    signal_type: str
+    signal_type: str = Field(..., description="Signal type: competitor_price | market_trend | sentiment")
     signal_date: date
     region: Optional[str] = None
     category: Optional[str] = None
-    value: float
-    raw_value: Optional[str] = None
+    item_id: Optional[str] = Field(default=None, description="Product item_id for product-level signals")
+    value: float = Field(..., description="Normalized value: competitor_price=ratio (1.0=parity, >1=competitor higher); market_trend=growth index (1.0=flat); sentiment=score (-1.0 to 1.0)")
+    raw_value: Optional[str] = Field(default=None, description="Original raw value, e.g. absolute price '¥25.5'")
     source: Optional[str] = None
     confidence: float = Field(default=1.0, ge=0, le=1)
 
