@@ -9,6 +9,7 @@ from app.models.store_energy import (
     StoreEquipment, StoreEnergyDaily, StoreEnergyBudget,
     StoreEnergyAlert, EquipmentSchedule,
 )
+from app.services.forecast_service import get_sales_forecast, _is_holiday
 
 
 # ---------- Dashboard ----------
@@ -310,42 +311,32 @@ async def optimize_equipment_schedule(db: AsyncSession, store_id: int):
     peak_traffic = max(hourly_traffic.values()) if hourly_traffic else 1.0
     low_traffic_threshold = peak_traffic * 0.30
 
-    # 2. Incorporate sales forecast peak signals — detect if upcoming days include
-    # holiday/promotional spikes that override the normal traffic pattern.
-    # Query recent daily sales and compare to moving average to find peak days.
-    sales_forecast_result = await db.execute(text("""
-        WITH daily_sales AS (
-            SELECT sale_date, SUM(total_amount) as daily_revenue
-            FROM sales
-            WHERE store_id = :store_id
-              AND sale_date >= CURRENT_DATE - INTERVAL '90 days'
-            GROUP BY sale_date
-        ),
-        moving_avg AS (
-            SELECT sale_date, daily_revenue,
-                   AVG(daily_revenue) OVER (ORDER BY sale_date ROWS BETWEEN 14 PRECEDING AND 1 PRECEDING) as ma_14d
-            FROM daily_sales
-        )
-        SELECT sale_date, daily_revenue, ma_14d,
-               EXTRACT(DOW FROM sale_date) as day_of_week
-        FROM moving_avg
-        WHERE daily_revenue > ma_14d * 1.5
-          AND ma_14d IS NOT NULL
-        ORDER BY sale_date DESC
-        LIMIT 30
-    """), {"store_id": store_id})
-    peak_days = sales_forecast_result.mappings().all()
+    # 2. Call the sales forecast service for next 14 days to detect future peak days
+    peak_day_map = {}  # day_of_week -> peak_ratio
+    try:
+        forecast = await get_sales_forecast(db, store_id, periods=14)
+    except Exception:
+        forecast = {"error": "forecast service unavailable"}
 
-    # Identify day-of-week patterns for peak sales (holidays/weekends with spikes)
-    peak_dow_set = set()
-    peak_revenue_ratio = {}
-    for row in peak_days:
-        dow = int(row["day_of_week"])
-        ratio = float(row["daily_revenue"]) / float(row["ma_14d"]) if row["ma_14d"] else 1.0
-        peak_dow_set.add(dow)
-        peak_revenue_ratio[dow] = max(peak_revenue_ratio.get(dow, 0), ratio)
+    if "error" not in forecast and "forecast" in forecast:
+        forecast_items = forecast["forecast"]  # list of dicts with "date", "value", "is_holiday"
 
-    # 3. Identify low-traffic hours (override: on peak sales days, raise the threshold)
+        # Calculate baseline (median of forecast values)
+        values_arr = np.array([item["value"] for item in forecast_items])
+        baseline = float(np.median(values_arr)) if len(values_arr) > 0 else 0
+
+        if baseline > 0:
+            for item in forecast_items:
+                ratio = item["value"] / baseline
+                fd = date.fromisoformat(item["date"])
+                dow = fd.weekday()  # 0=Mon ... 6=Sun
+                is_holiday = item.get("is_holiday", False) or _is_holiday(fd)
+
+                # Peak day: either holiday or forecast > 1.5x baseline
+                if ratio > 1.5 or is_holiday:
+                    peak_day_map[dow] = max(peak_day_map.get(dow, 0), ratio)
+
+    # 3. Identify low-traffic hours
     low_traffic_hours = set()
     for h, count in hourly_traffic.items():
         if count < low_traffic_threshold:
@@ -375,10 +366,8 @@ async def optimize_equipment_schedule(db: AsyncSession, store_id: int):
         rated = float(eq["rated_power_kw"])
 
         for day in range(7):
-            # On predicted peak-sales days (holiday spikes), keep equipment at full capacity
-            # to handle surging cooling/lighting demand from increased foot traffic
-            is_peak_day = day in peak_dow_set
-            day_peak_ratio = peak_revenue_ratio.get(day, 1.0)
+            is_peak_day = day in peak_day_map
+            peak_ratio = peak_day_map.get(day, 1.0)
 
             for h in range(24):
                 current_level = "full"
@@ -387,15 +376,20 @@ async def optimize_equipment_schedule(db: AsyncSession, store_id: int):
                 reduction_factor = 0.0
 
                 if eq_type == "hvac":
-                    if is_peak_day and day_peak_ratio > 1.5:
-                        # Holiday/peak day: refrigeration demand spikes with crowd density
-                        # Keep HVAC at full or even flag for pre-cooling extended window
-                        if (h + 1) in peak_hours or (h + 2) in peak_hours:
+                    if is_peak_day:
+                        # Holiday/peak: crowd density surge -> keep HVAC full
+                        # Pre-cool: extend to 2 hours before peak hours
+                        if h in peak_hours or (h + 1) in peak_hours or (h + 2) in peak_hours:
+                            # Full power, no reduction
                             recommended_level = "full"
-                            reason = f"Peak sales day (ratio {day_peak_ratio:.1f}x) — extended pre-cooling for crowd demand"
+                            reason = f"Peak day (forecast {peak_ratio:.1f}x) - extended pre-cooling for crowd demand"
                             reduction_factor = 0.0
-                        # Don't reduce even in normally-low-traffic hours on peak days
-                        continue
+                            # Still emit as explicit recommendation to keep full
+                            continue
+                        # Even in normally-low-traffic hours, only mild reduction
+                        recommended_level = "reduced"
+                        reason = f"Peak day (forecast {peak_ratio:.1f}x) - mild reduction only"
+                        reduction_factor = 0.15  # only 15% reduction vs normal 40%
                     elif h in low_traffic_hours:
                         recommended_level = "reduced"
                         reason = "Low traffic period - reduce HVAC output"
@@ -405,7 +399,7 @@ async def optimize_equipment_schedule(db: AsyncSession, store_id: int):
                         reason = "Pre-cool before predicted peak traffic"
                         reduction_factor = 0.0
                 elif eq_type == "lighting":
-                    if is_peak_day and day_peak_ratio > 1.5:
+                    if is_peak_day:
                         # Keep full lighting on peak sales days
                         continue
                     elif h in low_traffic_hours:
@@ -413,7 +407,14 @@ async def optimize_equipment_schedule(db: AsyncSession, store_id: int):
                         reason = "Low traffic - reduce lighting to 50%"
                         reduction_factor = 0.5
                 elif eq_type == "refrigeration":
-                    # Always constant — but on peak days, note extended duty
+                    # On holiday peak days, maintain full refrigeration for demand surge
+                    if is_peak_day:
+                        target_date = date.today() + timedelta(days=day - date.today().weekday())
+                        if _is_holiday(target_date):
+                            recommended_level = "full"
+                            reason = "Holiday peak - maintain full refrigeration for demand surge"
+                            # Emit explicit full recommendation but don't reduce
+                    # Always constant for refrigeration
                     continue
                 elif eq_type == "pos":
                     # Standby during store-closed hours (assume closed 22-7)

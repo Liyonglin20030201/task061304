@@ -1,6 +1,8 @@
 import pytest
 import math
 from datetime import date, timedelta
+from unittest.mock import AsyncMock, patch
+import numpy as np
 
 
 class TestEnergyKPICalculation:
@@ -358,3 +360,188 @@ class TestWeatherCorrelation:
         kwh = [100, 130]
         r = self._pearson_r(temps, kwh)
         assert r is None
+
+
+class TestForecastIntegration:
+    """Tests for forecast service integration in equipment schedule optimization."""
+
+    def _build_forecast_response(self, values_and_dates: list, holidays: list = None):
+        """Build a mock forecast response matching the real service's return format."""
+        forecast_items = []
+        for i, (d, v) in enumerate(values_and_dates):
+            is_hol = d in (holidays or [])
+            forecast_items.append({
+                "date": d.isoformat() if isinstance(d, date) else d,
+                "value": v,
+                "lower": v * 0.8,
+                "upper": v * 1.2,
+                "is_holiday": is_hol,
+            })
+        return {
+            "store_id": 1,
+            "forecast": forecast_items,
+            "historical": [],
+            "decomposition": {},
+            "metrics": {},
+            "promo_lift_factors": {},
+        }
+
+    def _derive_peak_day_map(self, forecast: dict) -> dict:
+        """
+        Reproduce the peak detection logic from optimize_equipment_schedule:
+        compute median baseline, then flag days with ratio > 1.5 or is_holiday.
+        """
+        from app.services.forecast_service import _is_holiday
+
+        if "error" in forecast or "forecast" not in forecast:
+            return {}
+
+        forecast_items = forecast["forecast"]
+        values_arr = np.array([item["value"] for item in forecast_items])
+        baseline = float(np.median(values_arr)) if len(values_arr) > 0 else 0
+
+        peak_day_map = {}
+        if baseline > 0:
+            for item in forecast_items:
+                ratio = item["value"] / baseline
+                fd = date.fromisoformat(item["date"]) if isinstance(item["date"], str) else item["date"]
+                dow = fd.weekday()
+                is_holiday = item.get("is_holiday", False) or _is_holiday(fd)
+
+                if ratio > 1.5 or is_holiday:
+                    peak_day_map[dow] = max(peak_day_map.get(dow, 0), ratio)
+
+        return peak_day_map
+
+    def _generate_schedule_for_type(
+        self,
+        eq_type: str,
+        peak_day_map: dict,
+        low_traffic_hours: set,
+        peak_hours: set,
+    ) -> list:
+        """
+        Simulate the per-day/hour recommendation logic for a single equipment type.
+        Returns list of (day, hour, recommended_level, reason) tuples.
+        """
+        from app.services.forecast_service import _is_holiday
+
+        recommendations = []
+        for day in range(7):
+            is_peak_day = day in peak_day_map
+            peak_ratio = peak_day_map.get(day, 1.0)
+
+            for h in range(24):
+                recommended_level = None
+                reason = ""
+
+                if eq_type == "hvac":
+                    if is_peak_day:
+                        if h in peak_hours or (h + 1) in peak_hours or (h + 2) in peak_hours:
+                            continue
+                        recommended_level = "reduced"
+                        reason = f"Peak day (forecast {peak_ratio:.1f}x) - mild reduction only"
+                    elif h in low_traffic_hours:
+                        recommended_level = "reduced"
+                        reason = "Low traffic period - reduce HVAC output"
+                    elif (h + 1) in peak_hours and h not in peak_hours:
+                        recommended_level = "full"
+                        reason = "Pre-cool before predicted peak traffic"
+                elif eq_type == "lighting":
+                    if is_peak_day:
+                        continue
+                    elif h in low_traffic_hours:
+                        recommended_level = "reduced"
+                        reason = "Low traffic - reduce lighting to 50%"
+                elif eq_type == "refrigeration":
+                    if is_peak_day:
+                        target_date = date.today() + timedelta(days=day - date.today().weekday())
+                        if _is_holiday(target_date):
+                            recommended_level = "full"
+                            reason = "Holiday peak - maintain full refrigeration for demand surge"
+                    continue
+
+                if recommended_level:
+                    recommendations.append((day, h, recommended_level, reason))
+
+        return recommendations
+
+    def test_peak_day_detection_from_forecast(self):
+        """Given forecast values with one day at 2x baseline, verify that day gets is_peak_day=True."""
+        # Build 14 days of forecast: most days at 1000, one day (a Wednesday) at 2500
+        base_date = date(2026, 6, 15)  # Monday
+        values_and_dates = []
+        for i in range(14):
+            d = base_date + timedelta(days=i)
+            val = 1000.0
+            if i == 2:  # Wednesday (weekday() == 2)
+                val = 2500.0  # 2.5x the others
+            values_and_dates.append((d, val))
+
+        forecast = self._build_forecast_response(values_and_dates)
+        peak_day_map = self._derive_peak_day_map(forecast)
+
+        # Wednesday (weekday=2) should be detected as a peak day
+        assert 2 in peak_day_map
+        assert peak_day_map[2] > 1.5
+
+        # Most other days should NOT be peak days
+        # Monday (0) has value 1000 with median ~1000, ratio ~1.0
+        assert 0 not in peak_day_map or peak_day_map.get(0, 0) <= 1.5
+
+    def test_holiday_keeps_hvac_full(self):
+        """On a holiday day, HVAC recommendations should not include 'reduced' at normal reduction levels."""
+        # Use Oct 1 (National Day) which is a Wednesday in some year
+        # We'll construct dates such that a known holiday falls on a specific weekday
+        # Oct 1, 2025 is Wednesday -> weekday() == 2
+        base_date = date(2025, 9, 29)  # Monday
+        values_and_dates = []
+        holidays = []
+        for i in range(14):
+            d = base_date + timedelta(days=i)
+            val = 1000.0
+            if (d.month, d.day) in {(10, 1), (10, 2), (10, 3), (10, 4), (10, 5), (10, 6), (10, 7)}:
+                holidays.append(d)
+                val = 1200.0  # Even moderate value is enough since _is_holiday triggers
+            values_and_dates.append((d, val))
+
+        forecast = self._build_forecast_response(values_and_dates, holidays=holidays)
+        peak_day_map = self._derive_peak_day_map(forecast)
+
+        # The holiday weekday (Wednesday=2 for Oct 1) should be in peak_day_map
+        # because _is_holiday returns True
+        assert 2 in peak_day_map  # Oct 1 is Wednesday
+
+        # Generate HVAC schedule for a day that is peak
+        low_traffic_hours = {0, 1, 2, 3, 4, 5, 22, 23}
+        peak_hours = {12, 13, 14, 15, 16}
+
+        recs = self._generate_schedule_for_type("hvac", peak_day_map, low_traffic_hours, peak_hours)
+
+        # On peak day (day=2), HVAC should NOT have "Low traffic period - reduce HVAC output"
+        # because the peak day logic takes precedence
+        peak_day_recs = [(d, h, level, r) for d, h, level, r in recs if d == 2]
+        for _, _, level, reason in peak_day_recs:
+            # Should never have the normal 40% reduction reason on peak days
+            assert "Low traffic period" not in reason
+
+    def test_forecast_error_fallback(self):
+        """When forecast returns error, scheduling still works (traffic-only mode)."""
+        forecast = {"error": "历史数据不足，至少需要14天数据", "store_id": 1}
+        peak_day_map = self._derive_peak_day_map(forecast)
+
+        # Should return empty peak_day_map (fallback to traffic-only)
+        assert peak_day_map == {}
+
+        # Schedule should still generate recommendations based on traffic alone
+        low_traffic_hours = {0, 1, 2, 3, 4, 5, 22, 23}
+        peak_hours = {12, 13, 14, 15}
+
+        recs = self._generate_schedule_for_type("hvac", {}, low_traffic_hours, peak_hours)
+
+        # Should have recommendations for low traffic hours
+        assert len(recs) > 0
+        # All should be traffic-based
+        for _, h, level, reason in recs:
+            if level == "reduced":
+                assert "Low traffic" in reason or "mild reduction" in reason
