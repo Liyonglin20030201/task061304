@@ -28,6 +28,19 @@ from app.models.store_energy import (
     StoreEquipment, StoreEnergyReading, StoreEnergyDaily,
     StoreEnergyBudget, StoreEnergyAlert, EquipmentSchedule,
 )
+from app.models.data_quality import (
+    DataQualityRule, DataQualityScore, DataQualityAlert, DataQualityCheckRun,
+)
+from app.models.employee_performance import (
+    Employee, EmployeeSalesRecord, EmployeeServiceRecord,
+    EmployeeAttendance, EmployeeTraining, PerformanceWeightConfig,
+)
+from app.models.product_lifecycle import (
+    Product, ProductLifecycleSnapshot, ProductRetirementRecommendation,
+)
+from app.models.demand_forecast import (
+    ExternalMarketSignal, ForecastModelConfig, ForecastAccuracyLog, ForecastABExperiment,
+)
 
 __all__ = [
     "User", "Role", "UserStorePermission",
@@ -46,4 +59,9 @@ __all__ = [
     "ChannelSale", "ChannelInventory", "ChannelMemberEvent", "ChannelAttribution",
     "StoreEquipment", "StoreEnergyReading", "StoreEnergyDaily",
     "StoreEnergyBudget", "StoreEnergyAlert", "EquipmentSchedule",
+    "DataQualityRule", "DataQualityScore", "DataQualityAlert", "DataQualityCheckRun",
+    "Employee", "EmployeeSalesRecord", "EmployeeServiceRecord",
+    "EmployeeAttendance", "EmployeeTraining", "PerformanceWeightConfig",
+    "Product", "ProductLifecycleSnapshot", "ProductRetirementRecommendation",
+    "ExternalMarketSignal", "ForecastModelConfig", "ForecastAccuracyLog", "ForecastABExperiment",
 ]

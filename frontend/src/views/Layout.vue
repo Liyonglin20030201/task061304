@@ -18,6 +18,13 @@
         <el-menu-item index="/space-layout"><el-icon><Grid /></el-icon><span>空间布局优化</span></el-menu-item>
         <el-menu-item index="/omnichannel"><el-icon><Monitor /></el-icon><span>全渠道整合</span></el-menu-item>
         <el-menu-item index="/store-energy"><el-icon><Lightning /></el-icon><span>能耗智能监控</span></el-menu-item>
+        <el-sub-menu index="advanced-analytics">
+          <template #title><el-icon><DataLine /></el-icon><span>高级分析</span></template>
+          <el-menu-item index="/employee-performance">员工绩效分析</el-menu-item>
+          <el-menu-item index="/product-lifecycle">商品生命周期</el-menu-item>
+          <el-menu-item index="/demand-forecast">智能需求预测</el-menu-item>
+          <el-menu-item index="/data-quality">数据质量监控</el-menu-item>
+        </el-sub-menu>
         <el-menu-item index="/import"><el-icon><Upload /></el-icon><span>数据导入</span></el-menu-item>
         <el-menu-item index="/reports"><el-icon><Document /></el-icon><span>报表导出</span></el-menu-item>
         <el-menu-item index="/tasks"><el-icon><List /></el-icon><span>任务日志</span></el-menu-item>

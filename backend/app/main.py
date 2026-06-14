@@ -10,6 +10,7 @@ from app.api import space_layout
 from app.api import omnichannel
 from app.api import association
 from app.api import store_energy
+from app.api import data_quality, employee_performance, product_lifecycle, demand_forecast
 from app.services.port_energy_service import start_energy_simulator
 import app.models.port_equipment
 import app.models.port_cargo
@@ -19,6 +20,10 @@ import app.models.space_layout
 import app.models.omnichannel
 import app.models.association
 import app.models.store_energy
+import app.models.data_quality
+import app.models.employee_performance
+import app.models.product_lifecycle
+import app.models.demand_forecast
 
 
 @asynccontextmanager
@@ -71,6 +76,10 @@ app.include_router(space_layout.router, prefix="/api")
 app.include_router(omnichannel.router, prefix="/api")
 app.include_router(association.router, prefix="/api")
 app.include_router(store_energy.router, prefix="/api")
+app.include_router(data_quality.router, prefix="/api")
+app.include_router(employee_performance.router, prefix="/api")
+app.include_router(product_lifecycle.router, prefix="/api")
+app.include_router(demand_forecast.router, prefix="/api")
 
 
 @app.get("/api/health")
