@@ -288,24 +288,17 @@ const kpiSummary = computed(() => {
 })
 
 // Heatmap
-const heatmapData = ref([])
+const heatmapData = ref({ plan_width: 100, plan_height: 100, cells: [] })
 const heatmapLoading = ref(false)
 
 const heatmapOption = computed(() => {
-  const items = heatmapData.value
+  const items = heatmapData.value.cells || []
   if (!items.length) return {}
   const maxIntensity = Math.max(...items.map(d => d.intensity || 0), 1)
 
-  // Auto-adapt coordinate mapping: derive bounds from actual zone geometry
-  // instead of assuming a fixed 100x100 coordinate space
-  const allX = items.map(d => (d.position_x || 0) + (d.width || 0))
-  const allY = items.map(d => (d.position_y || 0) + (d.height || 0))
-  const minX = Math.min(...items.map(d => d.position_x || 0))
-  const minY = Math.min(...items.map(d => d.position_y || 0))
-  const maxX = Math.max(...allX)
-  const maxY = Math.max(...allY)
-  const rangeX = maxX - minX || 1
-  const rangeY = maxY - minY || 1
+  // Use authoritative floor plan dimensions from backend
+  const planWidth = heatmapData.value.plan_width || 100
+  const planHeight = heatmapData.value.plan_height || 100
 
   return {
     tooltip: {
@@ -339,29 +332,20 @@ const heatmapOption = computed(() => {
         const drawHeight = chartHeight * (1 - 2 * pad)
         const offsetX = chartWidth * pad
         const offsetY = chartHeight * pad
-        // Map zone coordinates proportionally into the available canvas area
-        // preserving aspect ratio of the floor plan
-        const aspectPlan = rangeX / rangeY
-        const aspectChart = drawWidth / drawHeight
-        let scaleX, scaleY, shiftX = 0, shiftY = 0
-        if (aspectPlan > aspectChart) {
-          // Floor plan is wider than chart area — fit to width
-          scaleX = drawWidth / rangeX
-          scaleY = scaleX  // uniform scale preserves proportions
-          shiftY = (drawHeight - rangeY * scaleY) / 2
-        } else {
-          // Floor plan is taller — fit to height
-          scaleY = drawHeight / rangeY
-          scaleX = scaleY
-          shiftX = (drawWidth - rangeX * scaleX) / 2
-        }
+        // Map zone coordinates using floor plan physical dimensions
+        // preserving aspect ratio
+        const scaleX = drawWidth / planWidth
+        const scaleY = drawHeight / planHeight
+        const uniformScale = Math.min(scaleX, scaleY)
+        const shiftX = (drawWidth - planWidth * uniformScale) / 2
+        const shiftY = (drawHeight - planHeight * uniformScale) / 2
         return {
           type: 'rect',
           shape: {
-            x: offsetX + shiftX + ((item.position_x || 0) - minX) * scaleX,
-            y: offsetY + shiftY + ((item.position_y || 0) - minY) * scaleY,
-            width: (item.width || 1) * scaleX,
-            height: (item.height || 1) * scaleY,
+            x: offsetX + shiftX + (item.position_x || 0) * uniformScale,
+            y: offsetY + shiftY + (item.position_y || 0) * uniformScale,
+            width: (item.width || 1) * uniformScale,
+            height: (item.height || 1) * uniformScale,
           },
           style: {
             fill: bindApi.visual('color'),
@@ -616,7 +600,7 @@ function refreshData() {
 // --- Watchers ---
 watch(activeTab, (tab) => {
   if (tab === 'kpis' && kpiData.value.length === 0) fetchKPIs()
-  if (tab === 'heatmap' && heatmapData.value.length === 0) fetchHeatmap()
+  if (tab === 'heatmap' && (!heatmapData.value.cells || heatmapData.value.cells.length === 0)) fetchHeatmap()
   if (tab === 'recommendations' && recommendations.value.length === 0) fetchRecommendations()
 })
 

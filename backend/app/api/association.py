@@ -74,6 +74,7 @@ async def trigger_analysis(
             min_confidence=body.min_confidence,
             category_filter=body.category_filter,
             min_transactions=body.min_transactions,
+            adaptive_threshold=body.adaptive_threshold,
         )
         job.status = "completed"
         job.rules_found = result.get("rules_found", 0)

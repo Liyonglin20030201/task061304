@@ -22,9 +22,13 @@ async def _get_category_support_thresholds(
     (especially high-margin niche products) get a reduced threshold so their
     association rules are not pruned by a one-size-fits-all cutoff.
 
-    Logic: threshold = base * (category_share / max_category_share)^0.5
-    Clamped to [base * 0.1, base] — low-volume categories can go as low as 10% of base.
+    Logic:
+      1. Volume adjustment: threshold = base * (category_share / max_category_share)^0.5
+         Clamped to [base * 0.1, base].
+      2. Margin boost: categories with above-median average unit_price (proxy for
+         high margin) receive an additional 30% threshold reduction.
     """
+    # Query receipt counts per category
     sql = text("""
         SELECT category, COUNT(DISTINCT receipt_no) as receipt_count
         FROM sales
@@ -43,12 +47,44 @@ async def _get_category_support_thresholds(
     category_counts = {row[0]: int(row[1]) for row in rows}
     max_count = max(category_counts.values())
 
+    # Query average unit_price per category as margin proxy
+    price_sql = text("""
+        SELECT category, AVG(unit_price) as avg_price
+        FROM sales
+        WHERE store_id = :store_id AND sale_date BETWEEN :start_date AND :end_date
+          AND category IS NOT NULL AND unit_price IS NOT NULL
+        GROUP BY category
+    """)
+    price_result = await db.execute(price_sql, {
+        "store_id": store_id, "start_date": start_date, "end_date": end_date
+    })
+    price_rows = price_result.fetchall()
+    category_avg_price = {row[0]: float(row[1]) for row in price_rows if row[1] is not None}
+
+    # Determine median unit_price across categories
+    if category_avg_price:
+        sorted_prices = sorted(category_avg_price.values())
+        mid = len(sorted_prices) // 2
+        if len(sorted_prices) % 2 == 0 and len(sorted_prices) >= 2:
+            median_price = (sorted_prices[mid - 1] + sorted_prices[mid]) / 2
+        else:
+            median_price = sorted_prices[mid]
+    else:
+        median_price = None
+
     thresholds = {}
     for cat, count in category_counts.items():
         share_ratio = count / max_count if max_count > 0 else 1.0
         # Square root dampening: low-volume categories get disproportionately lower threshold
         adjusted = base_min_support * (share_ratio ** 0.5)
-        thresholds[cat] = max(adjusted, base_min_support * 0.1)
+        adjusted = max(adjusted, base_min_support * 0.1)
+
+        # High-margin boost: categories with above-median avg price get 30% reduction
+        if median_price is not None and cat in category_avg_price:
+            if category_avg_price[cat] > median_price:
+                adjusted *= 0.7
+
+        thresholds[cat] = max(adjusted, base_min_support * 0.05)
 
     return thresholds
 
@@ -62,11 +98,14 @@ async def run_association_analysis(
     min_confidence: float,
     category_filter: str = None,
     min_transactions: int = 2,
+    adaptive_threshold: bool = True,
 ) -> dict:
     """
     Main analysis function with category-adaptive support thresholds.
-    Low-volume high-margin products get a reduced support threshold so
-    their association rules are not lost.
+    When adaptive_threshold is True, per-item minimum counts are computed
+    from category volume and margin data and passed directly into the
+    Apriori candidate-generation/pruning loop so that niche/high-margin
+    items are not lost at the 1-itemset stage.
     """
     # Build baskets
     baskets, item_names, total_transactions = await _build_baskets(
@@ -86,48 +125,31 @@ async def run_association_analysis(
     for basket in baskets:
         all_items.update(basket)
 
-    # Get per-category dynamic support thresholds
-    category_thresholds = await _get_category_support_thresholds(
-        db, store_id, start_date, end_date, min_support
+    # Build per-item minimum count dict for category-aware Apriori
+    per_item_min_count = None
+    if adaptive_threshold:
+        # Get per-category dynamic support thresholds
+        category_thresholds = await _get_category_support_thresholds(
+            db, store_id, start_date, end_date, min_support
+        )
+
+        # Get item-to-category mapping
+        item_categories = await _get_item_categories(db, store_id, start_date, end_date)
+
+        if category_thresholds and item_categories:
+            per_item_min_count = {}
+            for item in all_items:
+                cat = item_categories.get(item)
+                if cat and cat in category_thresholds:
+                    cat_threshold = category_thresholds[cat]
+                    per_item_min_count[item] = cat_threshold * total_transactions
+                # Items without a category mapping fall back to global min_count inside _apriori
+
+    # Run Apriori with per-item thresholds (natively category-aware)
+    frequent_itemsets = _apriori(
+        baskets, all_items, min_support, total_transactions,
+        per_item_min_count=per_item_min_count,
     )
-
-    # Get item-to-category mapping for threshold assignment
-    item_categories = await _get_item_categories(db, store_id, start_date, end_date)
-
-    # Use the minimum applicable threshold across item categories in each itemset
-    # This ensures low-volume but high-margin items are not filtered out
-    effective_min_support = min_support
-    if category_thresholds:
-        effective_min_support = min(category_thresholds.values())
-
-    # Run Apriori with the lowest applicable threshold, then post-filter
-    frequent_itemsets = _apriori(baskets, all_items, effective_min_support, total_transactions)
-
-    # Post-filter: for each itemset, determine its applicable threshold based on
-    # the categories of its constituent items (use the min category threshold)
-    if category_thresholds:
-        filtered_itemsets = {}
-        for itemset, count in frequent_itemsets.items():
-            # Find categories for items in this itemset
-            item_cats = set()
-            for item_id in itemset:
-                cat = item_categories.get(item_id)
-                if cat:
-                    item_cats.add(cat)
-
-            # Applicable threshold = min threshold among the item's categories
-            if item_cats:
-                applicable_threshold = min(
-                    category_thresholds.get(cat, min_support) for cat in item_cats
-                )
-            else:
-                applicable_threshold = min_support
-
-            item_support = count / total_transactions
-            if item_support >= applicable_threshold:
-                filtered_itemsets[itemset] = count
-
-        frequent_itemsets = filtered_itemsets
 
     # Generate association rules
     rules = _generate_rules(frequent_itemsets, total_transactions, min_confidence)
@@ -250,27 +272,46 @@ async def _get_item_categories(
     return {row[0]: row[1] for row in result.fetchall()}
 
 
-def _apriori(baskets: list, items: set, min_support: float, total_transactions: int) -> dict:
+def _apriori(baskets: list, items: set, min_support: float, total_transactions: int,
+             per_item_min_count: dict = None) -> dict:
     """
-    Apriori algorithm (synchronous, CPU-bound):
-    1. Count single items, filter by min_support
+    Apriori algorithm (synchronous, CPU-bound) with optional per-item thresholds:
+    1. Count single items, filter by per-item or global min_count
     2. Generate candidate k-itemsets from (k-1)-itemsets
     3. Count support for candidates
-    4. Prune below min_support
+    4. Prune below the applicable threshold (minimum of constituents' thresholds)
     5. Repeat until no more candidates
+
+    Args:
+        baskets: list of sets of item_ids (transactions)
+        items: set of all item_ids
+        min_support: global minimum support fraction
+        total_transactions: total number of baskets
+        per_item_min_count: optional dict mapping item_id -> minimum count threshold.
+            For items not in this dict, the global min_count is used.
+            For k>=2 itemsets, the threshold is the MINIMUM of the per-item
+            thresholds of the constituent items (most lenient threshold wins).
+
     Returns: dict mapping frozenset -> support_count
     """
-    min_count = min_support * total_transactions
+    global_min_count = min_support * total_transactions
     frequent_itemsets = {}
 
-    # Step 1: Find frequent 1-itemsets
+    # Step 1: Find frequent 1-itemsets with per-item thresholds
     item_counts = defaultdict(int)
     for basket in baskets:
         for item in basket:
             item_counts[item] += 1
 
-    # Filter by min_support
-    freq_1 = {frozenset([item]): count for item, count in item_counts.items() if count >= min_count}
+    # Filter by per-item threshold (or global fallback)
+    freq_1 = {}
+    for item, count in item_counts.items():
+        if per_item_min_count is not None:
+            threshold = per_item_min_count.get(item, global_min_count)
+        else:
+            threshold = global_min_count
+        if count >= threshold:
+            freq_1[frozenset([item])] = count
     frequent_itemsets.update(freq_1)
 
     if not freq_1:
@@ -302,12 +343,21 @@ def _apriori(baskets: list, items: set, min_support: float, total_transactions: 
                 if candidate.issubset(basket_frozen):
                     candidate_counts[candidate] += 1
 
-        # Filter by min_support
-        current_freq = {
-            itemset: count
-            for itemset, count in candidate_counts.items()
-            if count >= min_count
-        }
+        # Filter by applicable threshold for each candidate itemset
+        # For k>=2: threshold = min of per-item thresholds of constituent items
+        current_freq = {}
+        for itemset, count in candidate_counts.items():
+            if per_item_min_count is not None:
+                # Use the minimum (most lenient) threshold among constituents
+                itemset_threshold = min(
+                    per_item_min_count.get(item, global_min_count)
+                    for item in itemset
+                )
+            else:
+                itemset_threshold = global_min_count
+            if count >= itemset_threshold:
+                current_freq[itemset] = count
+
         frequent_itemsets.update(current_freq)
         k += 1
 

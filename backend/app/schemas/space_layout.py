@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -106,3 +106,29 @@ class ZoneItemMappingCreate(BaseModel):
     zone_id: int
     category: str
     item_id: Optional[str] = None
+
+
+class FloorPlanCreate(BaseModel):
+    store_id: int
+    floor: int = 1
+    plan_width: float
+    plan_height: float
+    image_url: Optional[str] = None
+
+
+class FloorPlanResponse(BaseModel):
+    id: int
+    store_id: int
+    floor: int
+    plan_width: float
+    plan_height: float
+    image_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class HeatmapResponse(BaseModel):
+    plan_width: float
+    plan_height: float
+    cells: List[HeatmapCell]

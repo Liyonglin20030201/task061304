@@ -19,6 +19,9 @@ from app.schemas.space_layout import (
     ZoneResponse,
     ZoneKPI,
     HeatmapCell,
+    HeatmapResponse,
+    FloorPlanCreate,
+    FloorPlanResponse,
     ZoneRanking,
     ZoneTrend,
     LayoutRecommendation,
@@ -37,6 +40,8 @@ from app.services.space_layout_service import (
     generate_layout_recommendations,
     aggregate_zone_sales,
     compare_stores_layout,
+    get_floor_plan,
+    upsert_floor_plan,
 )
 
 router = APIRouter(prefix="/space-layout", tags=["space-layout"])
@@ -159,7 +164,7 @@ async def zone_kpis(
     return await get_zone_kpis(db, store_id, start_date, end_date)
 
 
-@router.get("/heatmap", response_model=List[HeatmapCell])
+@router.get("/heatmap", response_model=HeatmapResponse)
 async def heatmap(
     store_id: int = Query(..., description="门店ID"),
     start_date: str = Query(..., description="开始日期 YYYY-MM-DD"),
@@ -171,6 +176,37 @@ async def heatmap(
     user, authorized_stores, role_name = user_stores
     enforce_store_access(authorized_stores, store_id)
     return await get_sales_heatmap(db, store_id, start_date, end_date)
+
+
+@router.get("/floor-plan", response_model=Optional[FloorPlanResponse])
+async def get_floor_plan_endpoint(
+    store_id: int = Query(..., description="门店ID"),
+    floor: int = Query(1, description="楼层"),
+    user_stores: tuple = Depends(get_current_user_with_stores),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get floor plan configuration for a store."""
+    user, authorized_stores, role_name = user_stores
+    enforce_store_access(authorized_stores, store_id)
+    result = await get_floor_plan(db, store_id, floor)
+    if not result:
+        return None
+    return FloorPlanResponse(**result)
+
+
+@router.post("/floor-plan", response_model=FloorPlanResponse)
+async def set_floor_plan_endpoint(
+    data: FloorPlanCreate,
+    user_stores: tuple = Depends(get_current_user_with_stores),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set floor plan dimensions (admin/manager only)."""
+    user, authorized_stores, role_name = user_stores
+    if role_name not in (ROLE_ADMIN, ROLE_MANAGER):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
+    enforce_store_access(authorized_stores, data.store_id)
+    result = await upsert_floor_plan(db, data.model_dump())
+    return FloorPlanResponse(**result)
 
 
 @router.get("/ranking", response_model=List[ZoneRanking])

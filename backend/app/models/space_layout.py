@@ -56,3 +56,18 @@ class ZoneItemMapping(Base):
     zone_id = Column(Integer, ForeignKey("store_zones.id"), nullable=False)
     category = Column(String(50), nullable=False)
     item_id = Column(String(50), nullable=True)
+
+
+class StoreFloorPlan(Base):
+    __tablename__ = "store_floor_plans"
+    __table_args__ = (
+        UniqueConstraint("store_id", "floor", name="uq_store_floor_plan"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False)
+    floor = Column(Integer, default=1)
+    plan_width = Column(Float, nullable=False)   # physical width in meters
+    plan_height = Column(Float, nullable=False)  # physical height in meters
+    image_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())

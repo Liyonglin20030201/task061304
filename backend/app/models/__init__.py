@@ -19,7 +19,7 @@ from app.models.site_selection import (
     CandidateLocation, LocationFactor, SiteEvaluation,
     SiteWeightProfile, CompetitorLocation,
 )
-from app.models.space_layout import StoreZone, ZoneSalesDaily, ZoneItemMapping
+from app.models.space_layout import StoreZone, ZoneSalesDaily, ZoneItemMapping, StoreFloorPlan
 from app.models.association import AssociationRule, AssociationAnalysisJob
 from app.models.omnichannel import (
     ChannelSale, ChannelInventory, ChannelMemberEvent, ChannelAttribution,
@@ -41,7 +41,7 @@ __all__ = [
     "MarketingCampaign", "CampaignExecution", "MarketingRule", "CampaignAnalytics",
     "CandidateLocation", "LocationFactor", "SiteEvaluation",
     "SiteWeightProfile", "CompetitorLocation",
-    "StoreZone", "ZoneSalesDaily", "ZoneItemMapping",
+    "StoreZone", "ZoneSalesDaily", "ZoneItemMapping", "StoreFloorPlan",
     "AssociationRule", "AssociationAnalysisJob",
     "ChannelSale", "ChannelInventory", "ChannelMemberEvent", "ChannelAttribution",
     "StoreEquipment", "StoreEnergyReading", "StoreEnergyDaily",

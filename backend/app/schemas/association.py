@@ -11,6 +11,10 @@ class AnalysisJobCreate(BaseModel):
     end_date: date
     category_filter: Optional[str] = None
     min_transactions: int = Field(default=2, ge=2)
+    adaptive_threshold: bool = Field(
+        default=True,
+        description="Use dynamic per-category support thresholds. When False, a single global threshold is used.",
+    )
 
 
 class AnalysisJobResponse(BaseModel):

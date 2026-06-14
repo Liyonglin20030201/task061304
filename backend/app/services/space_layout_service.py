@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from typing import Optional, List
 
-from app.models.space_layout import StoreZone, ZoneSalesDaily, ZoneItemMapping
+from app.models.space_layout import StoreZone, ZoneSalesDaily, ZoneItemMapping, StoreFloorPlan
 
 
 async def get_zones(db: AsyncSession, store_id: int, authorized_stores: Optional[List[int]]):
@@ -111,6 +111,14 @@ async def get_zone_kpis(db: AsyncSession, store_id: int, start_date: str, end_da
 
 async def get_sales_heatmap(db: AsyncSession, store_id: int, start_date: str, end_date: str):
     """Get zone positions + total revenue, normalize intensities."""
+    # Query floor plan dimensions
+    plan_sql = """
+    SELECT plan_width, plan_height FROM store_floor_plans
+    WHERE store_id = :store_id AND floor = 1
+    """
+    plan_result = await db.execute(text(plan_sql), {"store_id": store_id})
+    plan_row = plan_result.fetchone()
+
     sql = """
     SELECT
         sz.id as zone_id,
@@ -134,8 +142,25 @@ async def get_sales_heatmap(db: AsyncSession, store_id: int, start_date: str, en
     })
     rows = result.fetchall()
 
+    # Determine floor plan dimensions
+    if plan_row:
+        plan_width = float(plan_row[0])
+        plan_height = float(plan_row[1])
+    else:
+        # Fallback: derive from zone max extents
+        if rows:
+            plan_width = max(
+                (float(r[2] or 0) + float(r[4] or 0)) for r in rows
+            ) or 100.0
+            plan_height = max(
+                (float(r[3] or 0) + float(r[5] or 0)) for r in rows
+            ) or 100.0
+        else:
+            plan_width = 100.0
+            plan_height = 100.0
+
     if not rows:
-        return []
+        return {"plan_width": plan_width, "plan_height": plan_height, "cells": []}
 
     max_revenue = max(float(r[6]) for r in rows)
     if max_revenue == 0:
@@ -155,7 +180,7 @@ async def get_sales_heatmap(db: AsyncSession, store_id: int, start_date: str, en
             "intensity": round(revenue_f / max_revenue, 4),
             "revenue": round(revenue_f, 2),
         })
-    return cells
+    return {"plan_width": plan_width, "plan_height": plan_height, "cells": cells}
 
 
 async def get_zone_ranking(
@@ -497,3 +522,40 @@ async def compare_stores_layout(
         })
 
     return grouped
+
+
+async def get_floor_plan(db: AsyncSession, store_id: int, floor: int = 1):
+    """Get floor plan configuration for a store."""
+    result = await db.execute(
+        select(StoreFloorPlan).where(
+            StoreFloorPlan.store_id == store_id,
+            StoreFloorPlan.floor == floor,
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if not plan:
+        return None
+    return {c.name: getattr(plan, c.name) for c in plan.__table__.columns}
+
+
+async def upsert_floor_plan(db: AsyncSession, data: dict):
+    """Create or update floor plan dimensions for a store."""
+    store_id = data["store_id"]
+    floor = data.get("floor", 1)
+    result = await db.execute(
+        select(StoreFloorPlan).where(
+            StoreFloorPlan.store_id == store_id,
+            StoreFloorPlan.floor == floor,
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if plan:
+        for key, value in data.items():
+            if value is not None and key not in ("store_id", "floor"):
+                setattr(plan, key, value)
+    else:
+        plan = StoreFloorPlan(**data)
+        db.add(plan)
+    await db.flush()
+    await db.refresh(plan)
+    return {c.name: getattr(plan, c.name) for c in plan.__table__.columns}
