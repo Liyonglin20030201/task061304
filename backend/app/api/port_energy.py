@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, Query
+from datetime import datetime, date
+from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.services import port_energy_service
@@ -6,24 +8,34 @@ from app.services import port_energy_service
 router = APIRouter(prefix="/port/energy", tags=["port-energy"])
 
 
+def _serialize_row(row: dict) -> dict:
+    out = {}
+    for k, v in row.items():
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+        elif isinstance(v, date):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
 @router.get("/equipment")
 async def list_equipment(db: AsyncSession = Depends(get_db)):
     rows = await port_energy_service.get_equipment_list(db)
-    return {"items": [dict(r) for r in rows]}
+    return {"items": [_serialize_row(dict(r)) for r in rows]}
 
 
 @router.get("/equipment/{equipment_id}")
 async def get_equipment(equipment_id: int, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import text
     result = await db.execute(
         text("SELECT * FROM port_equipment WHERE id = :id"),
         {"id": equipment_id}
     )
     row = result.mappings().first()
     if not row:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Equipment not found")
-    return dict(row)
+    return _serialize_row(dict(row))
 
 
 @router.get("/history")
@@ -35,7 +47,7 @@ async def get_history(
     db: AsyncSession = Depends(get_db),
 ):
     rows = await port_energy_service.get_energy_history(db, equipment_id, start_time, end_time, limit)
-    return {"items": [dict(r) for r in rows]}
+    return {"items": [_serialize_row(dict(r)) for r in rows]}
 
 
 @router.get("/cost-summary")
@@ -55,4 +67,4 @@ async def get_peak_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     peaks = await port_energy_service.get_peak_analysis(db, equipment_id, top_n)
-    return {"items": [dict(r) for r in peaks]}
+    return {"items": [_serialize_row(dict(r)) for r in peaks]}

@@ -1,3 +1,5 @@
+import asyncio
+import time as time_module
 from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +17,10 @@ STATUS_TRANSITIONS = {
     "inspection": None,
 }
 
+_stats_cache = None
+_stats_cache_ts = 0
+_STATS_TTL = 5
+
 
 async def create_container(db: AsyncSession, data: dict) -> dict:
     result = await db.execute(
@@ -25,6 +31,7 @@ async def create_container(db: AsyncSession, data: dict) -> dict:
     )
     container_id = result.scalar()
     await db.commit()
+    _invalidate_stats_cache()
     return await get_container(db, container_id)
 
 
@@ -34,20 +41,37 @@ async def get_container(db: AsyncSession, container_id: int) -> dict:
         {"id": container_id}
     )
     row = result.mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    return _format_container(dict(row))
+
+
+async def get_container_by_code(db: AsyncSession, code: str) -> dict:
+    result = await db.execute(
+        text("SELECT * FROM containers WHERE container_code = :code"),
+        {"code": code}
+    )
+    row = result.mappings().first()
+    if not row:
+        return None
+    return _format_container(dict(row))
 
 
 async def search_containers(db: AsyncSession, keyword: str = None, vessel: str = None,
                             status: str = None, start_date: str = None, end_date: str = None,
                             page: int = 1, page_size: int = 20):
-    where_clauses = ["1=1"]
+    where_clauses = []
     params = {}
 
     if keyword:
-        where_clauses.append("(container_code ILIKE :keyword OR bill_of_lading ILIKE :keyword)")
-        params["keyword"] = f"%{keyword}%"
+        if len(keyword) >= 4 and keyword[:4].isalpha():
+            where_clauses.append("container_code = :exact_code")
+            params["exact_code"] = keyword.upper()
+        else:
+            where_clauses.append("(container_code LIKE :keyword OR bill_of_lading LIKE :keyword)")
+            params["keyword"] = f"{keyword}%"
     if vessel:
-        where_clauses.append("vessel_name ILIKE :vessel")
+        where_clauses.append("vessel_name LIKE :vessel")
         params["vessel"] = f"%{vessel}%"
     if status:
         where_clauses.append("status = :status")
@@ -59,7 +83,7 @@ async def search_containers(db: AsyncSession, keyword: str = None, vessel: str =
         where_clauses.append("arrival_time <= :end_date")
         params["end_date"] = end_date
 
-    where = " AND ".join(where_clauses)
+    where = " AND ".join(where_clauses) if where_clauses else "1=1"
 
     count_result = await db.execute(text(f"SELECT COUNT(*) FROM containers WHERE {where}"), params)
     total = count_result.scalar()
@@ -70,7 +94,7 @@ async def search_containers(db: AsyncSession, keyword: str = None, vessel: str =
         text(f"SELECT * FROM containers WHERE {where} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
         params
     )
-    items = [dict(r) for r in result.mappings().all()]
+    items = [_format_container(dict(r)) for r in result.mappings().all()]
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
@@ -104,18 +128,29 @@ async def add_event(db: AsyncSession, container_id: int, data: dict) -> dict:
         await db.execute(text(f"UPDATE containers SET {update_fields} WHERE id = :id"), update_params)
 
     await db.commit()
+    _invalidate_stats_cache()
     return {"message": "Event recorded", "new_status": new_status}
 
 
 async def get_container_trace(db: AsyncSession, container_id: int) -> list:
     result = await db.execute(
-        text("SELECT * FROM container_events WHERE container_id = :id ORDER BY event_time ASC"),
+        text("""SELECT ce.*, pe.equipment_code, pe.name as equipment_name
+                FROM container_events ce
+                LEFT JOIN port_equipment pe ON ce.equipment_id = pe.id
+                WHERE ce.container_id = :id
+                ORDER BY ce.event_time ASC"""),
         {"id": container_id}
     )
-    return [dict(r) for r in result.mappings().all()]
+    return [_format_event(dict(r)) for r in result.mappings().all()]
 
 
 async def get_statistics(db: AsyncSession) -> dict:
+    global _stats_cache, _stats_cache_ts
+
+    now = time_module.time()
+    if _stats_cache and (now - _stats_cache_ts) < _STATS_TTL:
+        return _stats_cache
+
     result = await db.execute(text("""
         SELECT
             COUNT(*) as total_containers,
@@ -127,4 +162,33 @@ async def get_statistics(db: AsyncSession) -> dict:
         FROM containers
     """))
     row = result.mappings().first()
-    return dict(row)
+    stats = {
+        "total_containers": row["total_containers"] or 0,
+        "en_route": row["en_route"] or 0,
+        "stacked": row["stacked"] or 0,
+        "departed": row["departed"] or 0,
+        "avg_dwell_hours": round(float(row["avg_dwell_hours"] or 0), 1),
+    }
+    _stats_cache = stats
+    _stats_cache_ts = now
+    return stats
+
+
+def _invalidate_stats_cache():
+    global _stats_cache, _stats_cache_ts
+    _stats_cache = None
+    _stats_cache_ts = 0
+
+
+def _format_container(row: dict) -> dict:
+    for key in ["arrival_time", "departure_time", "created_at"]:
+        if row.get(key) and isinstance(row[key], datetime):
+            row[key] = row[key].isoformat()
+    return row
+
+
+def _format_event(row: dict) -> dict:
+    for key in ["event_time", "created_at"]:
+        if row.get(key) and isinstance(row[key], datetime):
+            row[key] = row[key].isoformat()
+    return row

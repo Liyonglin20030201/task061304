@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { ref, reactive } from 'vue'
 import { portEnergyApi } from '../api/port'
 
 export const usePortEnergyStore = defineStore('portEnergy', {
@@ -10,12 +11,16 @@ export const usePortEnergyStore = defineStore('portEnergy', {
     historyData: [],
     costSummary: [],
     trendBuffer: {},
+    lastSeq: 0,
+    droppedFrames: 0,
+    lastTickTs: 0,
   }),
 
   actions: {
     connect() {
       const token = localStorage.getItem('token')
       if (!token) return
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) return
 
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${protocol}//${location.host}/api/port/ws/energy?token=${token}`
@@ -23,24 +28,42 @@ export const usePortEnergyStore = defineStore('portEnergy', {
 
       this.ws.onopen = () => {
         this.connected = true
+        this.droppedFrames = 0
       }
 
       this.ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.type === 'pong') return
+        const msg = JSON.parse(event.data)
+        if (msg.type === 'pong') return
+        if (msg.type !== 'tick') return
 
-        this.readings[data.equipment_id] = data
+        const { seq, ts, readings } = msg
 
-        if (!this.trendBuffer[data.equipment_id]) {
-          this.trendBuffer[data.equipment_id] = []
+        if (this.lastSeq > 0 && seq > this.lastSeq + 1) {
+          this.droppedFrames += (seq - this.lastSeq - 1)
         }
-        const buffer = this.trendBuffer[data.equipment_id]
-        buffer.push({ time: data.timestamp, power: data.power_kw })
-        if (buffer.length > 300) buffer.shift()
+        this.lastSeq = seq
+        this.lastTickTs = ts
+
+        const newReadings = { ...this.readings }
+        for (const r of readings) {
+          newReadings[r.equipment_id] = {
+            ...r,
+            _seq: seq,
+          }
+
+          if (!this.trendBuffer[r.equipment_id]) {
+            this.trendBuffer[r.equipment_id] = []
+          }
+          const buffer = this.trendBuffer[r.equipment_id]
+          buffer.push({ time: ts, power: r.power_kw, state: r.operational_state })
+          if (buffer.length > 300) buffer.splice(0, buffer.length - 300)
+        }
+        this.readings = newReadings
       }
 
       this.ws.onclose = () => {
         this.connected = false
+        this.ws = null
         setTimeout(() => this.connect(), 3000)
       }
 
@@ -53,6 +76,7 @@ export const usePortEnergyStore = defineStore('portEnergy', {
       if (this.ws) {
         this.ws.close()
         this.ws = null
+        this.connected = false
       }
     },
 

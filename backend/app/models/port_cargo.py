@@ -24,8 +24,13 @@ class Container(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     __table_args__ = (
+        Index("ix_containers_code", "container_code"),
+        Index("ix_containers_bol", "bill_of_lading"),
         Index("ix_containers_vessel", "vessel_name", "voyage_no"),
         Index("ix_containers_status", "status"),
+        Index("ix_containers_arrival", "arrival_time"),
+        Index("ix_containers_created", "created_at"),
+        Index("ix_containers_status_arrival", "status", "arrival_time"),
     )
 
 
@@ -33,7 +38,7 @@ class ContainerEvent(Base):
     __tablename__ = "container_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    container_id = Column(Integer, nullable=False)
+    container_id = Column(Integer, nullable=False, index=True)
     event_type = Column(String(50), nullable=False)
     event_time = Column(DateTime, nullable=False)
     location = Column(String(100))
@@ -45,4 +50,5 @@ class ContainerEvent(Base):
     __table_args__ = (
         Index("ix_container_events_container_time", "container_id", "event_time"),
         Index("ix_container_events_type_time", "event_type", "event_time"),
+        Index("ix_container_events_container_id", "container_id"),
     )

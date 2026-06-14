@@ -1,7 +1,7 @@
 <template>
   <div class="energy-dashboard">
     <el-row :gutter="16" class="status-bar">
-      <el-col :span="6">
+      <el-col :span="5">
         <el-statistic title="总实时功率">
           <template #default>
             <span class="stat-value">{{ totalPower }}</span>
@@ -9,7 +9,7 @@
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="6">
+      <el-col :span="4">
         <el-statistic title="运行设备">
           <template #default>
             <span class="stat-value">{{ activeCount }}</span>
@@ -17,16 +17,25 @@
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="6">
-        <el-statistic title="WebSocket状态">
+      <el-col :span="5">
+        <el-statistic title="WebSocket">
           <template #default>
             <el-tag :type="store.connected ? 'success' : 'danger'" size="small">
               {{ store.connected ? '已连接' : '断开' }}
             </el-tag>
+            <span v-if="store.droppedFrames" class="dropped">(丢帧:{{ store.droppedFrames }})</span>
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="6">
+      <el-col :span="5">
+        <el-statistic title="采样序号">
+          <template #default>
+            <span class="stat-value">{{ store.lastSeq }}</span>
+            <span class="stat-unit">seq</span>
+          </template>
+        </el-statistic>
+      </el-col>
+      <el-col :span="5">
         <el-statistic title="今日能耗估算">
           <template #default>
             <span class="stat-value">{{ dailyEstimate }}</span>
@@ -119,15 +128,16 @@ function updateTrendChart() {
       type: 'line',
       smooth: true,
       showSymbol: false,
-      data: buffer.map(p => [p.time, p.power]),
+      data: buffer.map(p => [new Date(p.time).getTime(), p.power]),
     })
   }
   trendChart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
     legend: { data: legend },
-    xAxis: { type: 'time' },
+    xAxis: { type: 'time', splitNumber: 6 },
     yAxis: { type: 'value', name: '功率 (kW)' },
     series,
+    animation: false,
   })
 }
 
@@ -178,4 +188,5 @@ onUnmounted(() => {
   gap: 8px;
   justify-items: center;
 }
+.dropped { font-size: 11px; color: #f56c6c; margin-left: 4px; }
 </style>
