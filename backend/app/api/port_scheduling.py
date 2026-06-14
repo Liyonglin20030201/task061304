@@ -77,6 +77,25 @@ async def override_schedule(schedule_id: int, personnel_id: int = Query(...), db
     return result
 
 
+@router.get("/task-load")
+async def get_task_load(db: AsyncSession = Depends(get_db)):
+    """Real-time task load per personnel for allocation weight calculation."""
+    from sqlalchemy import text
+    result = await db.execute(text("""
+        SELECT pp.id as personnel_id, pp.employee_code, pp.name, pp.position,
+               COUNT(s.id) FILTER (WHERE s.status = 'active') as active_tasks,
+               COUNT(s.id) FILTER (WHERE s.schedule_date = CURRENT_DATE) as today_shifts,
+               COUNT(s.id) FILTER (WHERE s.schedule_date >= CURRENT_DATE - INTERVAL '7 days') as week_shifts
+        FROM port_personnel pp
+        LEFT JOIN schedules s ON pp.id = s.personnel_id
+        WHERE pp.is_active = true
+        GROUP BY pp.id, pp.employee_code, pp.name, pp.position
+        ORDER BY week_shifts DESC
+    """))
+    items = [_serialize_row(dict(r)) for r in result.mappings().all()]
+    return {"items": items, "ts": int(__import__('time').time() * 1000)}
+
+
 @router.get("/violations")
 async def get_violations(
     start_date: str = Query(None),

@@ -1,5 +1,4 @@
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
 import { portEnergyApi } from '../api/port'
 
 export const usePortEnergyStore = defineStore('portEnergy', {
@@ -14,6 +13,7 @@ export const usePortEnergyStore = defineStore('portEnergy', {
     lastSeq: 0,
     droppedFrames: 0,
     lastTickTs: 0,
+    latencyMs: 0,
   }),
 
   actions: {
@@ -32,30 +32,29 @@ export const usePortEnergyStore = defineStore('portEnergy', {
       }
 
       this.ws.onmessage = (event) => {
+        const recvTs = Date.now()
         const msg = JSON.parse(event.data)
         if (msg.type === 'pong') return
         if (msg.type !== 'tick') return
 
         const { seq, ts, readings } = msg
 
+        this.latencyMs = recvTs - ts
         if (this.lastSeq > 0 && seq > this.lastSeq + 1) {
           this.droppedFrames += (seq - this.lastSeq - 1)
         }
         this.lastSeq = seq
         this.lastTickTs = ts
 
-        const newReadings = { ...this.readings }
+        const newReadings = {}
         for (const r of readings) {
-          newReadings[r.equipment_id] = {
-            ...r,
-            _seq: seq,
-          }
+          newReadings[r.equipment_id] = r
 
           if (!this.trendBuffer[r.equipment_id]) {
             this.trendBuffer[r.equipment_id] = []
           }
           const buffer = this.trendBuffer[r.equipment_id]
-          buffer.push({ time: ts, power: r.power_kw, state: r.operational_state })
+          buffer.push([ts, r.power_kw])
           if (buffer.length > 300) buffer.splice(0, buffer.length - 300)
         }
         this.readings = newReadings
@@ -64,7 +63,7 @@ export const usePortEnergyStore = defineStore('portEnergy', {
       this.ws.onclose = () => {
         this.connected = false
         this.ws = null
-        setTimeout(() => this.connect(), 3000)
+        setTimeout(() => this.connect(), 2000)
       }
 
       this.ws.onerror = () => {

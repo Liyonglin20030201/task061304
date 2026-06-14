@@ -1,7 +1,7 @@
 <template>
   <div class="energy-dashboard">
     <el-row :gutter="16" class="status-bar">
-      <el-col :span="5">
+      <el-col :span="4">
         <el-statistic title="总实时功率">
           <template #default>
             <span class="stat-value">{{ totalPower }}</span>
@@ -17,29 +17,36 @@
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="5">
-        <el-statistic title="WebSocket">
+      <el-col :span="4">
+        <el-statistic title="链路延迟">
           <template #default>
-            <el-tag :type="store.connected ? 'success' : 'danger'" size="small">
-              {{ store.connected ? '已连接' : '断开' }}
-            </el-tag>
-            <span v-if="store.droppedFrames" class="dropped">(丢帧:{{ store.droppedFrames }})</span>
+            <span class="stat-value" :class="{ 'lag-warn': store.latencyMs > 1000 }">{{ store.latencyMs }}</span>
+            <span class="stat-unit">ms</span>
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="5">
-        <el-statistic title="采样序号">
+      <el-col :span="4">
+        <el-statistic title="序号/丢帧">
           <template #default>
             <span class="stat-value">{{ store.lastSeq }}</span>
-            <span class="stat-unit">seq</span>
+            <span v-if="store.droppedFrames" class="dropped"> / {{ store.droppedFrames }}</span>
           </template>
         </el-statistic>
       </el-col>
-      <el-col :span="5">
-        <el-statistic title="今日能耗估算">
+      <el-col :span="4">
+        <el-statistic title="累计能耗">
           <template #default>
-            <span class="stat-value">{{ dailyEstimate }}</span>
+            <span class="stat-value">{{ totalCumulativeKwh }}</span>
             <span class="stat-unit">kWh</span>
+          </template>
+        </el-statistic>
+      </el-col>
+      <el-col :span="4">
+        <el-statistic title="连接状态">
+          <template #default>
+            <el-tag :type="store.connected ? 'success' : 'danger'" size="small">
+              {{ store.connected ? '实时' : '断开' }}
+            </el-tag>
           </template>
         </el-statistic>
       </el-col>
@@ -47,7 +54,7 @@
 
     <el-row :gutter="16" style="margin-top: 16px;">
       <el-col :span="16">
-        <el-card header="实时功率趋势">
+        <el-card header="实时功率趋势 (1s刷新)">
           <div ref="trendChartRef" style="height: 300px;"></div>
         </el-card>
       </el-col>
@@ -95,29 +102,37 @@ const trendChartRef = ref(null)
 const costChartRef = ref(null)
 let trendChart = null
 let costChart = null
-let trendTimer = null
+let rafId = null
+let lastRenderTs = 0
 
 const cranes = computed(() => store.equipmentList.filter(e => e.equipment_type === 'crane'))
 
 const totalPower = computed(() => {
-  const sum = Object.values(store.readings).reduce((acc, r) => acc + (r.power_kw || 0), 0)
-  return Math.round(sum)
+  return Math.round(Object.values(store.readings).reduce((s, r) => s + (r.power_kw || 0), 0))
 })
 
 const activeCount = computed(() => {
-  return Object.values(store.readings).filter(r => r.operational_state !== 'idle').length
+  return Object.values(store.readings).filter(r => r.state !== 'idle').length
 })
 
-const dailyEstimate = computed(() => {
-  return Math.round(totalPower.value * 0.6 * 24)
+const totalCumulativeKwh = computed(() => {
+  const sum = Object.values(store.readings).reduce((s, r) => s + (r.cumulative_kwh || 0), 0)
+  return sum.toFixed(2)
 })
 
 function getReading(id) {
   return Math.round(store.readings[id]?.power_kw || 0)
 }
 
+function renderLoop(timestamp) {
+  rafId = requestAnimationFrame(renderLoop)
+  if (timestamp - lastRenderTs < 1000) return
+  lastRenderTs = timestamp
+  updateTrendChart()
+}
+
 function updateTrendChart() {
-  if (!trendChart) return
+  if (!trendChart || !store.equipmentList.length) return
   const series = []
   const legend = []
   for (const equip of store.equipmentList.slice(0, 4)) {
@@ -126,16 +141,17 @@ function updateTrendChart() {
     series.push({
       name: equip.name,
       type: 'line',
-      smooth: true,
+      smooth: false,
       showSymbol: false,
-      data: buffer.map(p => [new Date(p.time).getTime(), p.power]),
+      data: buffer,
     })
   }
   trendChart.setOption({
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { data: legend },
-    xAxis: { type: 'time', splitNumber: 6 },
-    yAxis: { type: 'value', name: '功率 (kW)' },
+    legend: { data: legend, top: 0 },
+    grid: { top: 30, bottom: 30 },
+    xAxis: { type: 'time', splitNumber: 8, axisLabel: { formatter: '{HH}:{mm}:{ss}' } },
+    yAxis: { type: 'value', name: 'kW', nameLocation: 'end' },
     series,
     animation: false,
   })
@@ -145,14 +161,15 @@ function updateCostChart() {
   if (!costChart || !store.costSummary.length) return
   costChart.setOption({
     tooltip: { trigger: 'axis' },
+    legend: { data: ['能耗 (kWh)', '成本 (元)'] },
     xAxis: { type: 'category', data: store.costSummary.map(s => s.equipment_code) },
     yAxis: [
-      { type: 'value', name: '能耗 (kWh)' },
-      { type: 'value', name: '成本 (元)' },
+      { type: 'value', name: 'kWh' },
+      { type: 'value', name: '元' },
     ],
     series: [
-      { name: '能耗', type: 'bar', data: store.costSummary.map(s => s.total_energy_kwh) },
-      { name: '成本', type: 'line', yAxisIndex: 1, data: store.costSummary.map(s => s.cost) },
+      { name: '能耗 (kWh)', type: 'bar', data: store.costSummary.map(s => s.total_kwh) },
+      { name: '成本 (元)', type: 'line', yAxisIndex: 1, data: store.costSummary.map(s => s.cost_yuan) },
     ],
   })
 }
@@ -166,14 +183,14 @@ onMounted(async () => {
   costChart = echarts.init(costChartRef.value)
   updateCostChart()
 
-  trendTimer = setInterval(updateTrendChart, 2000)
+  rafId = requestAnimationFrame(renderLoop)
 })
 
 onUnmounted(() => {
   store.disconnect()
+  if (rafId) cancelAnimationFrame(rafId)
   trendChart?.dispose()
   costChart?.dispose()
-  if (trendTimer) clearInterval(trendTimer)
 })
 </script>
 
@@ -182,11 +199,12 @@ onUnmounted(() => {
 .status-bar { background: #fff; padding: 20px; border-radius: 4px; }
 .stat-value { font-size: 24px; font-weight: bold; color: #303133; }
 .stat-unit { font-size: 14px; color: #909399; margin-left: 4px; }
+.lag-warn { color: #f56c6c; }
+.dropped { font-size: 12px; color: #f56c6c; }
 .gauge-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 8px;
   justify-items: center;
 }
-.dropped { font-size: 11px; color: #f56c6c; margin-left: 4px; }
 </style>

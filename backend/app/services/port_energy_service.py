@@ -26,7 +26,8 @@ _equipment_cache = []
 _db_session_factory = None
 _sequence = 0
 _equipment_states = {}
-_cumulative_energy = {}
+_cumulative_kwh = {}
+_next_tick_target = 0.0
 
 
 def time_of_day_factor(hour: int) -> float:
@@ -50,26 +51,26 @@ def generate_reading(equip: dict, hour: int, tick_ts_ms: int) -> dict:
     tod = time_of_day_factor(hour)
     noise = random.gauss(0, 0.03)
     power_factor = max(0.02, min(1.0, base_factor * tod + noise))
-    power_kw = equip["max_kw"] * power_factor
-    voltage = 380 + random.gauss(0, 3)
-    current_amps = (power_kw * 1000) / (voltage * 1.732) if voltage > 0 else 0
-    energy_kwh = power_kw / 3600
+
+    power_kw = round(equip["max_kw"] * power_factor, 2)
+    voltage = round(380 + random.gauss(0, 3), 1)
+    current_a = round((power_kw * 1000) / (voltage * 1.732), 2) if voltage > 0 else 0.0
+    delta_kwh = round(power_kw / 3600, 6)
 
     eq_id = equip.get("db_id", 0)
-    _cumulative_energy[eq_id] = _cumulative_energy.get(eq_id, 0) + energy_kwh
+    _cumulative_kwh[eq_id] = _cumulative_kwh.get(eq_id, 0.0) + delta_kwh
 
     return {
         "equipment_id": eq_id,
         "equipment_code": equip["code"],
         "equipment_type": equip["type"],
-        "power_kw": round(power_kw, 2),
-        "energy_kwh": round(energy_kwh, 4),
-        "cumulative_kwh": round(_cumulative_energy[eq_id], 4),
-        "voltage": round(voltage, 1),
-        "current_amps": round(current_amps, 2),
-        "operational_state": state,
+        "power_kw": power_kw,
+        "delta_kwh": delta_kwh,
+        "cumulative_kwh": round(_cumulative_kwh[eq_id], 4),
+        "voltage_v": voltage,
+        "current_a": current_a,
+        "state": state,
         "ts": tick_ts_ms,
-        "timestamp": datetime.fromtimestamp(tick_ts_ms / 1000).isoformat(),
     }
 
 
@@ -97,26 +98,32 @@ async def init_equipment(db: AsyncSession):
 
 
 async def start_energy_simulator(session_factory):
-    global _db_session_factory, _sequence
+    global _db_session_factory, _sequence, _next_tick_target
     _db_session_factory = session_factory
 
     async with session_factory() as db:
         await init_equipment(db)
 
+    _next_tick_target = time_module.monotonic() + 1.0
     batch_buffer = []
     tick = 0
 
     while True:
-        tick_start = time_module.time()
+        now_mono = time_module.monotonic()
+        sleep_needed = _next_tick_target - now_mono
+        if sleep_needed > 0:
+            await asyncio.sleep(sleep_needed)
+
+        _next_tick_target += 1.0
         _sequence += 1
-        now = datetime.now()
-        tick_ts_ms = int(now.timestamp() * 1000)
-        hour = now.hour
+
+        wall_now = datetime.now()
+        tick_ts_ms = int(wall_now.timestamp() * 1000)
+        hour = wall_now.hour
 
         readings = []
         for equip in _equipment_cache:
-            reading = generate_reading(equip, hour, tick_ts_ms)
-            readings.append(reading)
+            readings.append(generate_reading(equip, hour, tick_ts_ms))
 
         await manager.broadcast("energy", {
             "type": "tick",
@@ -130,12 +137,8 @@ async def start_energy_simulator(session_factory):
 
         if tick >= 10:
             tick = 0
-            await _batch_write_readings(batch_buffer)
+            asyncio.create_task(_batch_write_readings(list(batch_buffer)))
             batch_buffer = []
-
-        elapsed = time_module.time() - tick_start
-        sleep_time = max(0, 1.0 - elapsed)
-        await asyncio.sleep(sleep_time)
 
 
 async def _batch_write_readings(readings: list):
@@ -145,16 +148,17 @@ async def _batch_write_readings(readings: list):
         async with _db_session_factory() as db:
             for r in readings:
                 await db.execute(
-                    text("""INSERT INTO energy_readings (equipment_id, timestamp, power_kw, energy_kwh, voltage, current_amps, operational_state)
-                            VALUES (:equipment_id, :timestamp, :power_kw, :energy_kwh, :voltage, :current_amps, :operational_state)"""),
+                    text("""INSERT INTO energy_readings
+                            (equipment_id, timestamp, power_kw, energy_kwh, voltage, current_amps, operational_state)
+                            VALUES (:eid, to_timestamp(:ts_sec), :power, :delta, :volt, :amp, :state)"""),
                     {
-                        "equipment_id": r["equipment_id"],
-                        "timestamp": r["timestamp"],
-                        "power_kw": r["power_kw"],
-                        "energy_kwh": r["energy_kwh"],
-                        "voltage": r["voltage"],
-                        "current_amps": r["current_amps"],
-                        "operational_state": r["operational_state"],
+                        "eid": r["equipment_id"],
+                        "ts_sec": r["ts"] / 1000.0,
+                        "power": r["power_kw"],
+                        "delta": r["delta_kwh"],
+                        "volt": r["voltage_v"],
+                        "amp": r["current_a"],
+                        "state": r["state"],
                     }
                 )
             await db.commit()
@@ -168,7 +172,13 @@ async def get_equipment_list(db: AsyncSession):
 
 
 async def get_energy_history(db: AsyncSession, equipment_id: int = None, start_time: str = None, end_time: str = None, limit: int = 500):
-    query = "SELECT er.*, pe.equipment_code, pe.equipment_type FROM energy_readings er JOIN port_equipment pe ON er.equipment_id = pe.id WHERE 1=1"
+    query = """SELECT er.id, er.equipment_id, pe.equipment_code, pe.equipment_type,
+                      EXTRACT(EPOCH FROM er.timestamp)::bigint * 1000 as ts,
+                      er.power_kw, er.energy_kwh as delta_kwh,
+                      er.voltage as voltage_v, er.current_amps as current_a,
+                      er.operational_state as state
+               FROM energy_readings er
+               JOIN port_equipment pe ON er.equipment_id = pe.id WHERE 1=1"""
     params = {}
     if equipment_id:
         query += " AND er.equipment_id = :equipment_id"
@@ -196,36 +206,33 @@ async def get_cost_summary(db: AsyncSession, start_time: str = None, end_time: s
         params["end_time"] = end_time
 
     query = f"""
-        SELECT pe.id as equipment_id, pe.equipment_code, pe.name as equipment_name, pe.equipment_type,
-               COALESCE(SUM(er.energy_kwh), 0) as total_energy_kwh,
+        SELECT pe.id as equipment_id, pe.equipment_code, pe.equipment_type, pe.name as equipment_name,
+               COALESCE(SUM(er.energy_kwh), 0) as total_kwh,
                COALESCE(AVG(er.power_kw), 0) as avg_power_kw,
-               COALESCE(MAX(er.power_kw), 0) as max_power_kw,
-               COUNT(er.id) / 3600.0 as operating_hours
+               COALESCE(MAX(er.power_kw), 0) as peak_power_kw,
+               COUNT(er.id) as sample_count
         FROM port_equipment pe
         LEFT JOIN energy_readings er ON pe.id = er.equipment_id {time_filter}
-        GROUP BY pe.id, pe.equipment_code, pe.name, pe.equipment_type
-        ORDER BY total_energy_kwh DESC
+        GROUP BY pe.id, pe.equipment_code, pe.equipment_type, pe.name
+        ORDER BY total_kwh DESC
     """
     result = await db.execute(text(query), params)
     rows = result.mappings().all()
-
-    cost_configs = await db.execute(text("SELECT * FROM energy_cost_config WHERE is_active = true ORDER BY start_hour"))
-    configs = [dict(c) for c in cost_configs.mappings().all()]
     default_rate = 0.85
 
     summaries = []
     for row in rows:
-        cost = float(row["total_energy_kwh"]) * default_rate
+        total_kwh = round(float(row["total_kwh"]), 4)
         summaries.append({
             "equipment_id": row["equipment_id"],
             "equipment_code": row["equipment_code"],
             "equipment_type": row["equipment_type"],
             "equipment_name": row["equipment_name"],
-            "total_energy_kwh": round(float(row["total_energy_kwh"]), 2),
+            "total_kwh": total_kwh,
             "avg_power_kw": round(float(row["avg_power_kw"]), 2),
-            "max_power_kw": round(float(row["max_power_kw"]), 2),
-            "operating_hours": round(float(row["operating_hours"]), 2),
-            "cost": round(cost, 2),
+            "peak_power_kw": round(float(row["peak_power_kw"]), 2),
+            "sample_count": row["sample_count"],
+            "cost_yuan": round(total_kwh * default_rate, 2),
         })
     return summaries
 
@@ -233,7 +240,9 @@ async def get_cost_summary(db: AsyncSession, start_time: str = None, end_time: s
 async def get_peak_analysis(db: AsyncSession, equipment_id: int = None, top_n: int = 20):
     query = """
         SELECT er.equipment_id, pe.equipment_code, pe.equipment_type,
-               er.power_kw as peak_power_kw, er.timestamp as peak_time, er.operational_state
+               er.power_kw as peak_power_kw,
+               EXTRACT(EPOCH FROM er.timestamp)::bigint * 1000 as ts,
+               er.operational_state as state
         FROM energy_readings er
         JOIN port_equipment pe ON er.equipment_id = pe.id
     """

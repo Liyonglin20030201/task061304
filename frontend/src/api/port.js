@@ -27,6 +27,7 @@ export const portSchedulingApi = {
   getSchedules: (params) => api.get('/port/scheduling/schedules', { params }),
   overrideSchedule: (id, data) => api.put(`/port/scheduling/schedules/${id}`, data),
   getConstraintViolations: (params) => api.get('/port/scheduling/violations', { params }),
+  getTaskLoad: () => api.get('/port/scheduling/task-load'),
 }
 
 export const portAnalyticsApi = {

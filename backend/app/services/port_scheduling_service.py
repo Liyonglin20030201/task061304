@@ -85,7 +85,17 @@ async def generate_schedule(db: AsyncSession, start_date: date, end_date: date) 
     if not personnel or not shifts:
         return {"error": "No personnel or shifts defined", "schedules": [], "violations": []}
 
+    await db.execute(
+        text("""DELETE FROM schedules
+                WHERE schedule_date >= :sd AND schedule_date <= :ed
+                AND assignment_type = 'auto' AND status = 'planned'"""),
+        {"sd": start_date.isoformat(), "ed": end_date.isoformat()}
+    )
+
+    realtime_load = await _get_realtime_load(db)
     existing = await _get_existing_load(db, personnel)
+    for pid, extra in realtime_load.items():
+        existing[pid] = existing.get(pid, 0) + extra
 
     result = await asyncio.to_thread(_solve_schedule, personnel, shifts, start_date, end_date, existing)
 
@@ -113,10 +123,20 @@ async def _get_existing_load(db: AsyncSession, personnel: list) -> dict:
         SELECT personnel_id, COUNT(*) as shift_count
         FROM schedules
         WHERE schedule_date >= CURRENT_DATE - INTERVAL '7 days'
-        AND status != 'cancelled'
+        AND status NOT IN ('cancelled', 'planned')
         GROUP BY personnel_id
     """))
     return {row["personnel_id"]: row["shift_count"] for row in result.mappings().all()}
+
+
+async def _get_realtime_load(db: AsyncSession) -> dict:
+    result = await db.execute(text("""
+        SELECT personnel_id, COUNT(*) as active_tasks
+        FROM schedules
+        WHERE schedule_date = CURRENT_DATE AND status = 'active'
+        GROUP BY personnel_id
+    """))
+    return {row["personnel_id"]: row["active_tasks"] for row in result.mappings().all()}
 
 
 def _solve_schedule(personnel: list, shifts: list, start_date: date, end_date: date, existing_load: dict) -> dict:
