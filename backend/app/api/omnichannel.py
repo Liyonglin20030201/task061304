@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from typing import Optional
 from datetime import date
 
@@ -95,6 +96,21 @@ async def get_member_behavior(
     db: AsyncSession = Depends(get_db),
 ):
     user, authorized_stores, role_name = auth
+
+    # Verify member has data in authorized stores (prevent enumeration)
+    if authorized_stores is not None:
+        check_sql = text("""
+            SELECT 1 FROM channel_member_events
+            WHERE member_id = :member_id AND store_id = ANY(:store_ids)
+            LIMIT 1
+        """)
+        check = await db.execute(check_sql, {"member_id": member_id, "store_ids": authorized_stores})
+        if check.fetchone() is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无权访问该会员数据",
+            )
+
     return await get_member_cross_channel_behavior(db, member_id, authorized_stores)
 
 
@@ -121,7 +137,6 @@ async def get_inventory(
     user, authorized_stores, role_name = auth
     # Validate store access
     if authorized_stores is not None and store_id not in authorized_stores:
-        from fastapi import HTTPException, status
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this store")
     return await get_inventory_by_channel(db, store_id, snapshot_date)
 

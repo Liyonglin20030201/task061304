@@ -12,17 +12,33 @@ from app.schemas.omnichannel import (
 )
 
 
+def _build_store_filter(
+    store_ids: Optional[List[int]],
+    params: dict,
+    table_alias: str = "",
+    column: str = "store_id",
+) -> str:
+    """
+    Centralized store permission filter for all omnichannel queries.
+    Always returns a SQL fragment that enforces store isolation.
+    For admin (store_ids=None): no filter (returns empty string).
+    For non-admin: adds AND clause filtering by authorized stores.
+    """
+    if store_ids is None:
+        return ""
+    col = f"{table_alias}.{column}" if table_alias else column
+    params["_authorized_store_ids"] = store_ids
+    return f"AND {col} = ANY(:_authorized_store_ids)"
+
+
 async def get_channel_kpi_comparison(
     db: AsyncSession,
     store_ids: Optional[List[int]],
     start_date: date,
     end_date: date,
 ) -> ChannelKPIComparison:
-    store_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params)
 
     # Current period
     sql = f"""
@@ -45,13 +61,12 @@ async def get_channel_kpi_comparison(
     prev_start = start_date - timedelta(days=period_days)
     prev_end = start_date - timedelta(days=1)
     prev_params: dict = {"start": prev_start, "end": prev_end}
-    if store_ids is not None:
-        prev_params["store_ids"] = store_ids
+    prev_store_filter = _build_store_filter(store_ids, prev_params)
 
     prev_sql = f"""
     SELECT channel, COALESCE(SUM(total_amount), 0) as gmv
     FROM channel_sales
-    WHERE sale_date BETWEEN :start AND :end {store_filter}
+    WHERE sale_date BETWEEN :start AND :end {prev_store_filter}
     GROUP BY channel
     """
     prev_result = await db.execute(text(prev_sql), prev_params)
@@ -100,11 +115,8 @@ async def get_channel_trends(
     end_date: date,
     granularity: str = "daily",
 ) -> List[ChannelTrendPoint]:
-    store_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params)
 
     if granularity == "weekly":
         date_expr = "DATE_TRUNC('week', sale_date)::date"
@@ -145,11 +157,8 @@ async def get_channel_attribution(
     end_date: date,
     model: str = "last_touch",
 ) -> List[AttributionResult]:
-    store_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND cs.store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params, table_alias="cs")
 
     # Get conversions (purchases) in period with member info
     conversions_sql = f"""
@@ -177,14 +186,11 @@ async def get_channel_attribution(
     member_ids = list({row[1] for row in unique_conversions})
 
     # Get touchpoint history for these members — must also filter by store
-    events_store_filter = ""
     events_params: dict = {
         "member_ids": member_ids,
         "end_dt": datetime.combine(end_date, datetime.max.time()),
     }
-    if store_ids is not None:
-        events_store_filter = "AND (store_id = ANY(:store_ids) OR store_id IS NULL)"
-        events_params["store_ids"] = store_ids
+    events_store_filter = _build_store_filter(store_ids, events_params)
 
     events_sql = f"""
     SELECT member_id, channel, event_type, event_date
@@ -281,12 +287,9 @@ async def get_channel_funnel(
     end_date: date,
     channel: Optional[str] = None,
 ) -> List[ChannelFunnel]:
-    store_filter = ""
     channel_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params)
     if channel is not None:
         channel_filter = "AND channel = :channel"
         params["channel"] = channel
@@ -312,8 +315,7 @@ async def get_channel_funnel(
             "end_dt": datetime.combine(end_date, datetime.max.time()),
             "ch": ch,
         }
-        if store_ids is not None:
-            step_params["store_ids"] = store_ids
+        step_store_filter = _build_store_filter(store_ids, step_params)
 
         steps_data = []
         for step in funnel_steps:
@@ -323,7 +325,7 @@ async def get_channel_funnel(
             WHERE event_date BETWEEN :start AND :end_dt
               AND channel = :ch
               AND event_type = :event_type
-              {store_filter}
+              {step_store_filter}
             """
             step_params_full = {**step_params, "event_type": step}
             res = await db.execute(text(step_sql), step_params_full)
@@ -338,7 +340,7 @@ async def get_channel_funnel(
             WHERE event_date BETWEEN :start AND :end_dt
               AND channel = :ch
               AND event_type = 'purchase'
-              {store_filter}
+              {step_store_filter}
             GROUP BY member_id
             HAVING COUNT(*) >= 2
         ) sub
@@ -370,14 +372,11 @@ async def get_member_cross_channel_behavior(
     member_id: int,
     authorized_stores: Optional[List[int]] = None,
 ) -> MemberChannelBehavior:
-    store_filter = ""
     params: dict = {"member_id": member_id}
-    if authorized_stores is not None:
-        store_filter = "AND (store_id = ANY(:store_ids) OR store_id IS NULL)"
-        params["store_ids"] = authorized_stores
+    store_filter = _build_store_filter(authorized_stores, params)
 
     sql = f"""
-    SELECT channel, event_type, event_date, item_id, amount, session_id, device_type
+    SELECT channel, event_type, event_date, item_id, amount, session_id, device_type, store_id
     FROM channel_member_events
     WHERE member_id = :member_id {store_filter}
     ORDER BY event_date
@@ -434,11 +433,8 @@ async def get_channel_member_overlap(
     start_date: date,
     end_date: date,
 ) -> MemberOverlap:
-    store_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params)
 
     sql = f"""
     WITH member_channels AS (
@@ -536,11 +532,8 @@ async def get_unified_member_stats(
     start_date: date,
     end_date: date,
 ) -> UnifiedMemberStats:
-    store_filter = ""
     params: dict = {"start": start_date, "end": end_date}
-    if store_ids is not None:
-        store_filter = "AND store_id = ANY(:store_ids)"
-        params["store_ids"] = store_ids
+    store_filter = _build_store_filter(store_ids, params)
 
     # Total unique members and cross-channel %
     overview_sql = f"""
