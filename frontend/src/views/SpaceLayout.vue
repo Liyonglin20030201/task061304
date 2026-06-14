@@ -295,6 +295,18 @@ const heatmapOption = computed(() => {
   const items = heatmapData.value
   if (!items.length) return {}
   const maxIntensity = Math.max(...items.map(d => d.intensity || 0), 1)
+
+  // Auto-adapt coordinate mapping: derive bounds from actual zone geometry
+  // instead of assuming a fixed 100x100 coordinate space
+  const allX = items.map(d => (d.position_x || 0) + (d.width || 0))
+  const allY = items.map(d => (d.position_y || 0) + (d.height || 0))
+  const minX = Math.min(...items.map(d => d.position_x || 0))
+  const minY = Math.min(...items.map(d => d.position_y || 0))
+  const maxX = Math.max(...allX)
+  const maxY = Math.max(...allY)
+  const rangeX = maxX - minX || 1
+  const rangeY = maxY - minY || 1
+
   return {
     tooltip: {
       trigger: 'item',
@@ -319,17 +331,37 @@ const heatmapOption = computed(() => {
       renderItem: (params, bindApi) => {
         const item = items[params.dataIndex]
         if (!item) return null
-        const width = bindApi.getWidth()
-        const height = bindApi.getHeight()
-        const scaleX = width / 100
-        const scaleY = height / 100
+        const chartWidth = bindApi.getWidth()
+        const chartHeight = bindApi.getHeight()
+        // Reserve padding (5% each side) so zones don't clip at edges
+        const pad = 0.05
+        const drawWidth = chartWidth * (1 - 2 * pad)
+        const drawHeight = chartHeight * (1 - 2 * pad)
+        const offsetX = chartWidth * pad
+        const offsetY = chartHeight * pad
+        // Map zone coordinates proportionally into the available canvas area
+        // preserving aspect ratio of the floor plan
+        const aspectPlan = rangeX / rangeY
+        const aspectChart = drawWidth / drawHeight
+        let scaleX, scaleY, shiftX = 0, shiftY = 0
+        if (aspectPlan > aspectChart) {
+          // Floor plan is wider than chart area — fit to width
+          scaleX = drawWidth / rangeX
+          scaleY = scaleX  // uniform scale preserves proportions
+          shiftY = (drawHeight - rangeY * scaleY) / 2
+        } else {
+          // Floor plan is taller — fit to height
+          scaleY = drawHeight / rangeY
+          scaleX = scaleY
+          shiftX = (drawWidth - rangeX * scaleX) / 2
+        }
         return {
           type: 'rect',
           shape: {
-            x: (item.position_x || 0) * scaleX,
-            y: (item.position_y || 0) * scaleY,
-            width: (item.width || 10) * scaleX,
-            height: (item.height || 10) * scaleY,
+            x: offsetX + shiftX + ((item.position_x || 0) - minX) * scaleX,
+            y: offsetY + shiftY + ((item.position_y || 0) - minY) * scaleY,
+            width: (item.width || 1) * scaleX,
+            height: (item.height || 1) * scaleY,
           },
           style: {
             fill: bindApi.visual('color'),

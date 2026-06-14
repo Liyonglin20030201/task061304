@@ -9,6 +9,50 @@ from datetime import datetime, date
 from app.models.association import AssociationRule, AssociationAnalysisJob
 
 
+async def _get_category_support_thresholds(
+    db: AsyncSession,
+    store_id: int,
+    start_date: str,
+    end_date: str,
+    base_min_support: float,
+) -> dict:
+    """
+    Calculate dynamic support thresholds per category.
+    High-volume categories keep the base threshold; low-volume categories
+    (especially high-margin niche products) get a reduced threshold so their
+    association rules are not pruned by a one-size-fits-all cutoff.
+
+    Logic: threshold = base * (category_share / max_category_share)^0.5
+    Clamped to [base * 0.1, base] — low-volume categories can go as low as 10% of base.
+    """
+    sql = text("""
+        SELECT category, COUNT(DISTINCT receipt_no) as receipt_count
+        FROM sales
+        WHERE store_id = :store_id AND sale_date BETWEEN :start_date AND :end_date
+          AND category IS NOT NULL
+        GROUP BY category
+    """)
+    result = await db.execute(sql, {
+        "store_id": store_id, "start_date": start_date, "end_date": end_date
+    })
+    rows = result.fetchall()
+
+    if not rows:
+        return {}
+
+    category_counts = {row[0]: int(row[1]) for row in rows}
+    max_count = max(category_counts.values())
+
+    thresholds = {}
+    for cat, count in category_counts.items():
+        share_ratio = count / max_count if max_count > 0 else 1.0
+        # Square root dampening: low-volume categories get disproportionately lower threshold
+        adjusted = base_min_support * (share_ratio ** 0.5)
+        thresholds[cat] = max(adjusted, base_min_support * 0.1)
+
+    return thresholds
+
+
 async def run_association_analysis(
     db: AsyncSession,
     store_id: int,
@@ -20,13 +64,9 @@ async def run_association_analysis(
     min_transactions: int = 2,
 ) -> dict:
     """
-    Main analysis function:
-    1. Query sales grouped by receipt_no to build baskets
-    2. Filter baskets with >= min_transactions items
-    3. Run Apriori to find frequent itemsets
-    4. Generate rules from frequent itemsets
-    5. Store results in association_rules table
-    6. Return summary stats
+    Main analysis function with category-adaptive support thresholds.
+    Low-volume high-margin products get a reduced support threshold so
+    their association rules are not lost.
     """
     # Build baskets
     baskets, item_names, total_transactions = await _build_baskets(
@@ -46,8 +86,48 @@ async def run_association_analysis(
     for basket in baskets:
         all_items.update(basket)
 
-    # Run Apriori algorithm
-    frequent_itemsets = _apriori(baskets, all_items, min_support, total_transactions)
+    # Get per-category dynamic support thresholds
+    category_thresholds = await _get_category_support_thresholds(
+        db, store_id, start_date, end_date, min_support
+    )
+
+    # Get item-to-category mapping for threshold assignment
+    item_categories = await _get_item_categories(db, store_id, start_date, end_date)
+
+    # Use the minimum applicable threshold across item categories in each itemset
+    # This ensures low-volume but high-margin items are not filtered out
+    effective_min_support = min_support
+    if category_thresholds:
+        effective_min_support = min(category_thresholds.values())
+
+    # Run Apriori with the lowest applicable threshold, then post-filter
+    frequent_itemsets = _apriori(baskets, all_items, effective_min_support, total_transactions)
+
+    # Post-filter: for each itemset, determine its applicable threshold based on
+    # the categories of its constituent items (use the min category threshold)
+    if category_thresholds:
+        filtered_itemsets = {}
+        for itemset, count in frequent_itemsets.items():
+            # Find categories for items in this itemset
+            item_cats = set()
+            for item_id in itemset:
+                cat = item_categories.get(item_id)
+                if cat:
+                    item_cats.add(cat)
+
+            # Applicable threshold = min threshold among the item's categories
+            if item_cats:
+                applicable_threshold = min(
+                    category_thresholds.get(cat, min_support) for cat in item_cats
+                )
+            else:
+                applicable_threshold = min_support
+
+            item_support = count / total_transactions
+            if item_support >= applicable_threshold:
+                filtered_itemsets[itemset] = count
+
+        frequent_itemsets = filtered_itemsets
 
     # Generate association rules
     rules = _generate_rules(frequent_itemsets, total_transactions, min_confidence)
@@ -149,6 +229,25 @@ async def _build_baskets(
     total_transactions = len(baskets)
 
     return baskets, item_names, total_transactions
+
+
+async def _get_item_categories(
+    db: AsyncSession,
+    store_id: int,
+    start_date: str,
+    end_date: str,
+) -> dict:
+    """Return a mapping of item_id -> category for all items sold in the period."""
+    sql = text("""
+        SELECT DISTINCT item_id, category
+        FROM sales
+        WHERE store_id = :store_id AND sale_date BETWEEN :start_date AND :end_date
+          AND category IS NOT NULL
+    """)
+    result = await db.execute(sql, {
+        "store_id": store_id, "start_date": start_date, "end_date": end_date
+    })
+    return {row[0]: row[1] for row in result.fetchall()}
 
 
 def _apriori(baskets: list, items: set, min_support: float, total_transactions: int) -> dict:

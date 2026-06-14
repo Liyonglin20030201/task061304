@@ -94,7 +94,8 @@ async def get_member_behavior(
     auth: tuple = Depends(get_current_user_with_stores),
     db: AsyncSession = Depends(get_db),
 ):
-    return await get_member_cross_channel_behavior(db, member_id)
+    user, authorized_stores, role_name = auth
+    return await get_member_cross_channel_behavior(db, member_id, authorized_stores)
 
 
 @router.get("/member-overlap")

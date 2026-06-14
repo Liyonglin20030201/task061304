@@ -176,18 +176,25 @@ async def get_channel_attribution(
 
     member_ids = list({row[1] for row in unique_conversions})
 
-    # Get touchpoint history for these members
-    events_sql = """
+    # Get touchpoint history for these members — must also filter by store
+    events_store_filter = ""
+    events_params: dict = {
+        "member_ids": member_ids,
+        "end_dt": datetime.combine(end_date, datetime.max.time()),
+    }
+    if store_ids is not None:
+        events_store_filter = "AND (store_id = ANY(:store_ids) OR store_id IS NULL)"
+        events_params["store_ids"] = store_ids
+
+    events_sql = f"""
     SELECT member_id, channel, event_type, event_date
     FROM channel_member_events
     WHERE member_id = ANY(:member_ids)
       AND event_date <= :end_dt
+      {events_store_filter}
     ORDER BY member_id, event_date
     """
-    events_result = await db.execute(text(events_sql), {
-        "member_ids": member_ids,
-        "end_dt": datetime.combine(end_date, datetime.max.time()),
-    })
+    events_result = await db.execute(text(events_sql), events_params)
     events_rows = events_result.fetchall()
 
     # Build member -> events map
@@ -361,14 +368,21 @@ async def get_channel_funnel(
 async def get_member_cross_channel_behavior(
     db: AsyncSession,
     member_id: int,
+    authorized_stores: Optional[List[int]] = None,
 ) -> MemberChannelBehavior:
-    sql = """
+    store_filter = ""
+    params: dict = {"member_id": member_id}
+    if authorized_stores is not None:
+        store_filter = "AND (store_id = ANY(:store_ids) OR store_id IS NULL)"
+        params["store_ids"] = authorized_stores
+
+    sql = f"""
     SELECT channel, event_type, event_date, item_id, amount, session_id, device_type
     FROM channel_member_events
-    WHERE member_id = :member_id
+    WHERE member_id = :member_id {store_filter}
     ORDER BY event_date
     """
-    result = await db.execute(text(sql), {"member_id": member_id})
+    result = await db.execute(text(sql), params)
     rows = result.fetchall()
 
     events = []
