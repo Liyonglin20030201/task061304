@@ -1,16 +1,25 @@
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from app.database import engine, Base
+from app.database import engine, Base, AsyncSessionLocal
 from app.api import auth, stores, sales, inventory, members, promotions, traffic, weather, analytics, imports, reports, tasks
 from app.api import replenishment, site_selection, marketing, supply_chain
+from app.api import port_energy, port_cargo, port_scheduling, port_analytics, port_ws
+from app.services.port_energy_service import start_energy_simulator
+import app.models.port_equipment
+import app.models.port_cargo
+import app.models.port_scheduling
+import app.models.port_analytics
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    simulator_task = asyncio.create_task(start_energy_simulator(AsyncSessionLocal))
     yield
+    simulator_task.cancel()
     await engine.dispose()
 
 
@@ -45,6 +54,11 @@ app.include_router(replenishment.router, prefix="/api")
 app.include_router(site_selection.router, prefix="/api")
 app.include_router(marketing.router, prefix="/api")
 app.include_router(supply_chain.router, prefix="/api")
+app.include_router(port_energy.router, prefix="/api")
+app.include_router(port_cargo.router, prefix="/api")
+app.include_router(port_scheduling.router, prefix="/api")
+app.include_router(port_analytics.router, prefix="/api")
+app.include_router(port_ws.router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -26,6 +26,11 @@ const routes = [
       { path: 'import', name: 'Import', component: () => import('../views/Import.vue') },
       { path: 'reports', name: 'Reports', component: () => import('../views/Reports.vue') },
       { path: 'tasks', name: 'TaskLogs', component: () => import('../views/TaskLogs.vue') },
+      { path: 'port/energy', name: 'PortEnergy', component: () => import('../views/port/EnergyDashboard.vue') },
+      { path: 'port/cargo', name: 'PortCargo', component: () => import('../views/port/CargoTrace.vue') },
+      { path: 'port/scheduling', name: 'PortScheduling', component: () => import('../views/port/Scheduling.vue') },
+      { path: 'port/analytics', name: 'PortAnalytics', component: () => import('../views/port/PortAnalytics.vue') },
+      { path: 'port/yard-3d', name: 'PortYard3D', component: () => import('../views/port/YardView3D.vue') },
     ],
   },
 ]

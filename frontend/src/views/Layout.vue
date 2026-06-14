@@ -17,6 +17,14 @@
         <el-menu-item index="/import"><el-icon><Upload /></el-icon><span>数据导入</span></el-menu-item>
         <el-menu-item index="/reports"><el-icon><Document /></el-icon><span>报表导出</span></el-menu-item>
         <el-menu-item index="/tasks"><el-icon><List /></el-icon><span>任务日志</span></el-menu-item>
+        <el-sub-menu index="port">
+          <template #title><el-icon><Ship /></el-icon><span>港口作业</span></template>
+          <el-menu-item index="/port/energy">能耗监控</el-menu-item>
+          <el-menu-item index="/port/cargo">货物追溯</el-menu-item>
+          <el-menu-item index="/port/scheduling">智能排班</el-menu-item>
+          <el-menu-item index="/port/analytics">数据分析</el-menu-item>
+          <el-menu-item index="/port/yard-3d">3D堆场</el-menu-item>
+        </el-sub-menu>
       </el-menu>
     </el-aside>
     <el-container>
